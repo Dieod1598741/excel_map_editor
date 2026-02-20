@@ -116,7 +116,7 @@ class AddressMapApp:
                        bootstyle=(SUCCESS, STRIPED)).pack(side=tk.RIGHT, padx=10)
 
         # ── 메인 수평 분할 ────────────────────────────────────────────────────
-        main_h_pane = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        main_h_pane = tb.PanedWindow(self.root, orient=tk.HORIZONTAL)
         main_h_pane.pack(expand=True, fill=tk.BOTH, padx=12, pady=(4, 8))
 
         # 왼쪽: 지도 영역 (상대적 컨테이너로 S/M/L 오버레이 배치)
@@ -141,7 +141,7 @@ class AddressMapApp:
             self._pin_size_btns[size] = btn
 
         # ── 오른쪽 수직 분할 ─────────────────────────────────────────────────
-        right_v_pane = ttk.PanedWindow(main_h_pane, orient=tk.VERTICAL)
+        right_v_pane = tb.PanedWindow(main_h_pane, orient=tk.VERTICAL)
         main_h_pane.add(right_v_pane, weight=2)
 
         # ── 오른쪽 상단: 설정 + 장소 목록 ────────────────────────────────────
@@ -163,7 +163,7 @@ class AddressMapApp:
             self._color_btns[t] = btn
         self._refresh_color_btn_styles()
 
-        ttk.Separator(self.list_container, orient="horizontal").pack(fill=tk.X, pady=6)
+        tb.Separator(self.list_container, orient="horizontal").pack(fill=tk.X, pady=6)
 
         # 전체 선택/해제
         self.select_all_var = tk.BooleanVar(value=True)
