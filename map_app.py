@@ -1,9 +1,5 @@
 """
-Excel Map Editor - Professional Mapping Solution
-Copyright (c) 2026
-
-This application provides a robust interface for geocoding Excel-based address data 
-and rendering high-quality static maps using the Vworld API.
+엑셀 지도 에디터 - 메인 애플리케이션
 """
 import ttkbootstrap as tb
 from ttkbootstrap.constants import *
@@ -11,171 +7,19 @@ from ttkbootstrap.scrolled import ScrolledFrame
 import pandas as pd
 import requests
 from io import BytesIO
-from PIL import Image, ImageTk, ImageDraw, ImageFont
+from PIL import Image, ImageTk
 import json
 import os
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
-import math
+from tkinter import filedialog, messagebox
 import threading
-from typing import Optional, Tuple, Dict, List
+from typing import Optional, Tuple, Dict, List, Any
 
-# =============================================================================
-# API CONFIGURATION & CONSTANTS
-# =============================================================================
-
-# Vworld API Endpoints for Geocoding and Static Map Services
-GEOCODE_URL = "http://api.vworld.kr/req/address"
-SEARCH_URL  = "http://api.vworld.kr/req/search"
-STATIC_MAP_URL = "http://api.vworld.kr/req/image"
-
-# Projection Constants
-TILE_SIZE = 256  # Standard Web Mercator tile size
-
-# Palette definition for pin categorization
-PRESET_PALETTES = [
-    "#1A3A8F",  # Navy Blue
-    "#E83030",  # Red
-    "#2A9A2A",  # Green
-    "#E87A00",  # Orange
-    "#8B008B",  # Purple
-    "#008B8B",  # Teal
-]
-
-# 타입별 초기 팔레트 인덱스
-DEFAULT_TYPE_COLOR_IDX = {
-    "색상변경": 0
-}
-
-LABEL_DIRECTIONS = {
-    "↖ 좌상":  "top-left",
-    "↑ 위":    "top",
-    "↗ 우상":  "top-right",
-    "← 왼쪽":  "left",
-    "→ 오른쪽": "right",
-    "↙ 좌하":  "bottom-left",
-    "↓ 아래":  "bottom",
-    "↘ 우하":  "bottom-right",
-}
-DIR_ICON_MAP = {
-    "top-left": "↖", "top": "↑", "top-right": "↗",
-    "left": "←", "right": "→",
-    "bottom-left": "↙", "bottom": "↓", "bottom-right": "↘",
-}
-LABEL_DIR_KEYS = list(LABEL_DIRECTIONS.keys())
-
-# ── 핀 크기 배율 ──────────────────────────────────────────────────────────────
-PIN_SIZE_MULT = {"S": 0.3, "M": 1.0, "L": 2.5}
-
-# ── 사용 가능 폰트 (이름: 파일명) ────────────────────────────────────────────
-FONT_OPTIONS = {
-    "굴림":      "gulim.ttc"
-}
-
-
-# =============================================================================
-# GEOSPATIAL UTILITIES
-# =============================================================================
-
-def latlon_to_pixel(lat: float, lon: float, zoom: float, center_lat: float, center_lon: float, map_width: int, map_height: int) -> Tuple[int, int]:
-    """
-    Converts WGS84 Geodetic coordinates to pixel coordinates using Web Mercator Projection.
-    
-    Args:
-        lat, lon: Target coordinates.
-        zoom: Current zoom level.
-        center_lat, center_lon: Map center coordinates.
-        map_width, map_height: Dimensions of the viewport.
-        
-    Returns:
-        (x, y) tuple in pixel space.
-    """
-    def lon_to_x(ln, z):
-        return (ln + 180.0) / 360.0 * (TILE_SIZE * (2 ** z))
-
-    def lat_to_y(lt, z):
-        lr = math.radians(lt)
-        return (1.0 - math.log(math.tan(lr) + 1.0 / math.cos(lr)) / math.pi) / 2.0 * (TILE_SIZE * (2 ** z))
-
-    cx = lon_to_x(center_lon, zoom)
-    cy = lat_to_y(center_lat, zoom)
-    px = lon_to_x(lon, zoom)
-    py = lat_to_y(lat, zoom)
-    return int(map_width / 2 + (px - cx)), int(map_height / 2 + (py - cy))
-
-
-def hex_to_rgba(hex_color, alpha=255):
-    """#RRGGBB → (R,G,B,A)"""
-    h = hex_color.lstrip("#")
-    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4)) + (alpha,)
-
-
-def draw_outline_pin(draw, x, y, radius, border_color=(26, 58, 143, 255)):
-    """사진 참조 스타일: 흰 배경 원 + 컬러 테두리 (그림자 포함)"""
-    # 그림자
-    shadow_offset = max(2, int(radius * 0.2))
-    for i in range(3, 0, -1):
-        alpha = 15 * i
-        draw.ellipse([
-            x - radius + shadow_offset, y - radius + shadow_offset,
-            x + radius + shadow_offset, y + radius + shadow_offset
-        ], fill=(0, 0, 0, alpha))
-    # 흰 배경 원
-    draw.ellipse([x - radius, y - radius, x + radius, y + radius],
-                 fill=(255, 255, 255, 255))
-    # 컬러 테두리
-    border_width = max(2, int(radius * 0.22))
-    draw.ellipse([x - radius, y - radius, x + radius, y + radius],
-                 outline=border_color, width=border_width)
-
-
-def calculate_zoom_and_center(coords: List[Tuple[float, float]], map_width: int, map_height: int, padding: float = 0.05) -> Tuple[float, float, float]:
-    """
-    Determines the optimal center and zoom level to fit all provided coordinates within the viewport.
-    
-    Uses a brute-force fitting algorithm to ensure all markers and their labels are visible,
-    respecting a safety margin (padding).
-    """
-    if not coords:
-        return 37.5666, 126.9784, 12.0
-
-    lons = [c[0] for c in coords]
-    lats = [c[1] for c in coords]
-    min_lon, max_lon = min(lons), max(lons)
-    min_lat, max_lat = min(lats), max(lats)
-
-    def lat_to_merc_y(lt):
-        lr = math.radians(lt)
-        return math.log(math.tan(lr) + 1.0 / math.cos(lr))
-
-    def merc_y_to_lat(y):
-        return math.degrees(math.atan(math.sinh(y)))
-
-    min_y = lat_to_merc_y(min_lat)
-    max_y = lat_to_merc_y(max_lat)
-    center_lon = (min_lon + max_lon) / 2
-    center_lat = merc_y_to_lat((min_y + max_y) / 2)
-
-    base_margin    = int(map_width * padding / 2)
-    pin_height_buf = 30
-    label_width_buf = 60
-    top_margin  = base_margin + pin_height_buf
-    side_margin = base_margin + label_width_buf
-
-    for test_zoom in range(180, 69, -1):
-        z = test_zoom / 10.0
-        all_fit = True
-        for lon, lat in coords:
-            px, py = latlon_to_pixel(lat, lon, z, center_lat, center_lon, map_width, map_height)
-            if (px < side_margin or px > map_width - side_margin or
-                    py < top_margin or py > map_height - base_margin):
-                all_fit = False
-                break
-        if all_fit:
-            return center_lat, center_lon, z
-
-    return center_lat, center_lon, 7.0
-
+# 모듈별 기능 임포트
+from config import *
+from utils.geo_utils import latlon_to_pixel, calculate_zoom_and_center
+from utils.geocoding import GeocodeEngine
+from renderer.map_renderer import MapRenderer
 
 # ─────────────────────────────────────────────────────────────────────────────
 class ToolTip:
@@ -203,6 +47,7 @@ class ToolTip:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 class AddressMapApp:
     def __init__(self, root):
         self.root = root
@@ -212,6 +57,7 @@ class AddressMapApp:
 
         # ── 상태 변수 ────────────────────────────────────────────────────────
         self.api_key          = self.load_api_key()
+        self.geo_engine       = GeocodeEngine(self.api_key)
         self.marker_positions = []
         self.place_data       = []   # {lon, lat, name, addr, type, label_dir, visible, var}
         self.current_center   = (37.5666, 126.9784)
@@ -228,22 +74,13 @@ class AddressMapApp:
         self.blend_timer  = None
 
         # ── 커스터마이징 설정 ───────────────────────────────────────────────
-        # 타입별 현재 팔레트 인덱스
-        self.type_color_idx = dict(DEFAULT_TYPE_COLOR_IDX)
-        # 타입별 현재 색상 (인덱스 → hex)
+        self.type_color_idx = dict(TYPE_COLOR_MAP)
         self.type_colors = {t: PRESET_PALETTES[idx] for t, idx in self.type_color_idx.items()}
 
-        # 핀 크기 배율
-        self.pin_size_key = "M"   # S / M / L
-
-        # 폰트 (굴림 고정)
+        self.pin_size_key = tk.StringVar(value="보통")
         self.font_size_var = tk.IntVar(value=12)
 
         self.tooltip = ToolTip(self.root)
-        
-        # Geocoding cache to minimize API calls and respect quotas
-        self.geocode_cache: Dict[str, Tuple[float, float, str]] = {}
-        
         self.setup_ui()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -438,9 +275,14 @@ class AddressMapApp:
     # 핀 크기 선택
     # ─────────────────────────────────────────────────────────────────────────
     def set_pin_size(self, size_key):
-        self.pin_size_key = size_key
+        """핀 크기를 변경하고 이미지를 다시 렌더링합니다."""
+        self.pin_size_key.set(size_key)
+        # 버튼 스타일 업데이트 (선택된 것만 강조)
         for k, btn in self._pin_size_btns.items():
-            btn.configure(bootstyle=PRIMARY if k == size_key else "outline-secondary")
+            if k == size_key:
+                btn.configure(bootstyle=PRIMARY)
+            else:
+                btn.configure(bootstyle="outline-secondary")
         self.render_current_view()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -493,171 +335,52 @@ class AddressMapApp:
     # 지오코딩 엔진
     # ─────────────────────────────────────────────────────────────────────────
     def geocode(self, address: str) -> Tuple[Optional[float], Optional[float], Optional[str]]:
-        """
-        Main entry point for geocoding. Checks cache first before making API calls.
-        """
-        address = str(address).strip()
-        if not address or address.lower() == "nan":
-            return None, None, None
-
-        # Check Cache
-        if address in self.geocode_cache:
-            return self.geocode_cache[address]
-
-        for art in ["(위치를 찾을 수 없음)", "(실패)", "[실패]", "위치를 찾을 수 없음"]:
-            address = address.replace(art, "").strip()
-
-        refined_addr = self._standardize_province_name(address)
-        lon, lat, road_addr = self._smart_search_orchestrator(refined_addr)
-        
-        if not lon and "세종" in refined_addr:
-            fb = refined_addr.replace("세종특별자치시", "세종").replace("세종시", "세종")
-            if fb != refined_addr:
-                lon, lat, road_addr = self._smart_search_orchestrator(fb)
-
-        if not lon:
-            parts = refined_addr.split(" ")
-            if len(parts) > 2:
-                for i in range(1, len(parts) - 1):
-                    lon, lat, road_addr = self._smart_search_orchestrator(" ".join(parts[i:]))
-                    if lon: break
-
-        # Update Cache
-        if lon:
-            self.geocode_cache[address] = (lon, lat, road_addr)
-            
-        return lon, lat, road_addr
-
-    def _standardize_province_name(self, address):
-        replacements = {
-            "강원도": "강원특별자치도",
-            "전라북도": "전북특별자치도",
-            "세종시": "세종특별자치시",
-            "세종 ": "세종특별자치시 ",
-            "제주시": "제주특별자치도 제주시",
-            "서귀포시": "제주특별자치도 서귀포시",
-        }
-        for old, new in replacements.items():
-            if old in address and new not in address:
-                address = address.replace(old, new)
-        return address
-
-    def _smart_search_orchestrator(self, address):
-        addr_keywords = ['시 ', '구 ', '로 ', '길 ', '동 ', '읍 ', '면 ']
-        is_address_like = any(kw in address for kw in addr_keywords)
-
-        # 1. 주소 형태인 경우 지오코딩 우선 시도
-        if is_address_like:
-            lon, lat, addr = self._try_geocode_api(address, type="ROAD")
-            if lon:
-                return lon, lat, addr
-            lon, lat, addr = self._try_geocode_api(address, type="PARCEL")
-            if lon:
-                return lon, lat, addr
-
-        # 2. 장소/명칭 검색 시도 (1차: 정밀)
-        lon, lat, addr = self._try_search_api(address)
-        if lon:
-            return lon, lat, addr
-
-        # 3. 검색 실패 시 단어별 분할하여 검색 (마지막 단어 위주)
-        if " " in address:
-            parts = address.split(" ")
-            # 뒤에서부터 단어를 조합하여 재검색
-            for i in range(len(parts)-1, 0, -1):
-                sub_query = " ".join(parts[i:])
-                if len(sub_query) > 1:
-                    lon, lat, addr = self._try_search_api(sub_query)
-                    if lon:
-                        return lon, lat, addr
-
-        return None, None, None
-
-    def _try_geocode_api(self, address, type="ROAD"):
-        params = {
-            "service": "address", "request": "getCoord",
-            "key": self.api_key, "address": address,
-            "type": type, "format": "json",
-        }
-        try:
-            data = requests.get(GEOCODE_URL, params=params).json()
-            if data.get("response", {}).get("status") == "OK":
-                pt = data["response"]["result"]["point"]
-                refined = data["response"].get("refined", {}).get("text", address)
-                return float(pt["x"]), float(pt["y"]), refined
-        except:
-            pass
-        return None, None, None
-
-    def _try_search_api(self, address, refined=False):
-        query = address
-        if refined and " " not in address:
-            query = f"{address} 서울"
-        
-        # Vworld 검색 API 파라미터 최적화
-        # category="point"를 제거하여 더 넓은 범위(교량, 교차로 등) 검색 허용
-        params = {
-            "service": "search", "request": "search",
-            "key": self.api_key, "query": query,
-            "type": "place",
-            "size": 10, "format": "json",
-        }
-        try:
-            res = requests.get(SEARCH_URL, params=params)
-            data = res.json()
-            if data.get("response", {}).get("status") == "OK":
-                items = data["response"]["result"]["items"]
-                if items:
-                    pt = items[0]["point"]
-                    road_addr = items[0].get("roadAddress") or items[0].get("address", "주소 정보 없음")
-                    return float(pt["x"]), float(pt["y"]), road_addr
-        except:
-            pass
-        return None, None, None
+        """주소 변환 엔진을 호출합니다."""
+        return self.geo_engine.geocode(address)
 
     # ─────────────────────────────────────────────────────────────────────────
     # 엑셀 로드
     # ─────────────────────────────────────────────────────────────────────────
     def load_excel(self):
-        """Triggers the Excel loading process in a separate background thread."""
+        """엑셀 로딩 프로세스를 별도의 백그라운드 스레드에서 실행합니다."""
         if not self.api_key:
-            messagebox.showerror("Error", "API Key is required.")
+            messagebox.showerror("오류", "API 키가 필요합니다.")
             return
         file_path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx *.xls")])
         if not file_path:
             return
 
-        # Start background processing thread
+        # 백그라운드 처리 스레드 시작
         thread = threading.Thread(target=self._process_excel_thread, args=(file_path,), daemon=True)
         thread.start()
 
     def _process_excel_thread(self, file_path: str):
         """
-        Background worker for parsing Excel and geocoding.
-        Maintains UI responsiveness by offloading heavy IO/CPU tasks.
+        엑셀 파싱 및 지오코딩을 위한 백그라운드 워커입니다.
+        무거운 I/O 및 CPU 작업을 분리하여 UI 응답성을 유지합니다.
         """
-        self.add_log(f"Loading file: {os.path.basename(file_path)}")
-        self.add_log("Step 1: Commencing Geocoding...")
+        self.add_log(f"파일 로드 중: {os.path.basename(file_path)}")
+        self.add_log("1단계: 지오코딩(주소 변환) 시작...")
 
         try:
             df = pd.read_excel(file_path)
             df.columns = [str(c).strip() for c in df.columns]
 
             if '주소' not in df.columns:
-                self.root.after(0, lambda: messagebox.showerror("Error", "'Address' column not found."))
+                self.root.after(0, lambda: messagebox.showerror("오류", "'주소' 컬럼을 찾을 수 없습니다."))
                 return
 
             total_rows = len(df)
             temp_place_data = []
 
-            # Clear existing list in UI thread
+            # 메인 스레드에서 기존 UI 목록 초기화
             self.root.after(0, self._clear_ui_on_load)
 
             success_count = 0
             fail_count    = 0
 
             for i, row in df.iterrows():
-                # Update progress bar
+                # 프로그레스 바 업데이트
                 self.progress_var.set((i + 1) / total_rows * 50)
 
                 addr_raw = row.get('주소')
@@ -682,7 +405,7 @@ class AddressMapApp:
 
                 if lon and lat:
                     success_count += 1
-                    # Prepare data and update UI
+                    # 데이터 준비 및 UI 업데이트 요청
                     item_data = {
                         "lon": lon, "lat": lat, "name": name, "addr": road_addr,
                         "type": type_val, "order": order_val, "label_dir": "top",
@@ -693,25 +416,25 @@ class AddressMapApp:
                     self.add_log(f"✓ {name} [{type_val}]")
                 else:
                     fail_count += 1
-                    self.add_log(f"✗ Failed: {addr}")
+                    self.add_log(f"✗ 실패: {addr}")
 
             self.place_data = temp_place_data
-            self.add_log(f"Stage 1 Complete: {success_count} success, {fail_count} failed")
+            self.add_log(f"1단계 완료: {success_count}개 성공, {fail_count}개 실패")
             self.root.after(0, self._finalize_loading_ui)
 
         except Exception as e:
-            self.add_log(f"Excel Extraction Error: {e}")
-            self.root.after(0, lambda: messagebox.showerror("Error", f"Failed to read file: {e}"))
+            self.add_log(f"엑셀 추출 오류: {e}")
+            self.root.after(0, lambda: messagebox.showerror("오류", f"파일 읽기 실패: {e}"))
 
     def _clear_ui_on_load(self):
-        """Helper to clear UI elements from the main thread."""
+        """메인 스레드에서 UI 요소를 정리하는 헬퍼 함수"""
         for widget in self.scrollable_frame.winfo_children():
             widget.destroy()
 
     def _add_place_to_ui(self, item_data):
         """
-        Dynamically adds a place item to the sidebar list.
-        Must be called via self.root.after for thread safety.
+        사이드바 목록에 장소 아이템을 동적으로 추가합니다.
+        스레드 안전을 위해 self.root.after를 통해 호출되어야 합니다.
         """
         var     = tk.BooleanVar(value=True)
         dir_var = tk.StringVar(value="⬆ 위")
@@ -843,9 +566,9 @@ class AddressMapApp:
     # ─────────────────────────────────────────────────────────────────────────
     def refresh_map(self):
         """
-        Fetches a high-resolution base map from the Vworld Static Map API.
-        Offsets and scales are handled by the rendering engine to provide
-        seamless navigation while waiting for the new tile.
+        브이월드 정적 지도 API로부터 고해상도 베이스 지도를 가져옵니다.
+        새 타일을 기다리는 동안 렌더링 엔진에서 오프셋과 스케일을 조절하여
+        끊김 없는 탐색을 제공합니다.
         """
         if not self.place_data:
             return
@@ -866,8 +589,8 @@ class AddressMapApp:
         }
         try:
             req = requests.Request('GET', STATIC_MAP_URL, params=params).prepare()
-            self.add_log(f"Refreshing Base Map: {req.url.replace(self.api_key, 'MASKED')}")
-            # Offload heavy IO to avoid blocking the main event loop
+            self.add_log(f"베이스 지도 갱신 중: {req.url.replace(self.api_key, 'MASKED')}")
+            # 메인 이벤트 루프 차단을 방지하기 위해 무거운 I/O 분리
             response = requests.get(STATIC_MAP_URL, params=params)
 
             if response.status_code == 200:
@@ -880,21 +603,21 @@ class AddressMapApp:
                     self.raw_map_img = Image.open(img_data).convert("RGBA")
                     self.start_crossfade()
                 except Exception as img_err:
-                    self.add_log(f"Image Parsing Error: {img_err}")
+                    self.add_log(f"이미지 파싱 오류: {img_err}")
             else:
-                self.add_log(f"Map Server Error: Status {response.status_code}")
+                self.add_log(f"지도 서버 오류: 상태 코드 {response.status_code}")
         except Exception as e:
-            self.add_log(f"Map Loading Error: {e}")
+            self.add_log(f"지도 로딩 오류: {e}")
 
     def start_crossfade(self):
-        """Initiates a smooth alpha-blending transition between old and new map tiles."""
+        """이전 지도 타일과 새 타일 사이의 부드러운 알파 블렌딩 전환을 시작합니다."""
         if self.blend_timer:
             self.root.after_cancel(self.blend_timer)
         self.blend_alpha = 0.0
         self.animate_crossfade()
 
     def animate_crossfade(self):
-        """Iterative alpha update for the map transition animation."""
+        """지도 전환 애니메이션을 위한 반복적인 알파 업데이트입니다."""
         self.blend_alpha += 0.2
         if self.blend_alpha >= 1.0:
             self.blend_alpha = 1.0
@@ -908,306 +631,28 @@ class AddressMapApp:
     # 렌더링 (핵심)
     # ─────────────────────────────────────────────────────────────────────────
     def render_current_view(self):
-        """
-        The Main Hybrid Rendering Engine.
-        Processes map panning, zooming, and marker/label positioning with collision avoidance.
-        Implements a Force-Directed Repulsion system for non-overlapping labels.
-        """
+        """메인 렌더링 엔진 모듈을 호출합니다."""
         if not hasattr(self, 'raw_map_img') or not self.raw_map_img:
             return
 
-        map_w, map_h = 800, 800
-        zoom = self.current_zoom
-        clat, clon = self.current_center
+        img, positions = MapRenderer.render_current_view(
+            raw_map_img=self.raw_map_img,
+            current_zoom=self.current_zoom,
+            current_center=self.current_center,
+            last_api_center=self.last_api_center,
+            last_api_zoom=self.last_api_zoom,
+            place_data=self.place_data,
+            pin_size_key=self.pin_size_key.get(),
+            font_size=self.font_size_var.get(),
+            type_colors=self.type_colors,
+            old_map_img=self.old_map_img,
+            old_last_center=getattr(self, 'old_last_center', None),
+            old_last_zoom=getattr(self, 'old_last_zoom', None),
+            blend_alpha=self.blend_alpha
+        )
 
-        # ── 새 이미지 처리 ──────────────────────────────────────────────────
-        base_zoom    = self.last_api_zoom
-        zoom_diff    = zoom - base_zoom
-        scale_factor = 2.0 ** zoom_diff
-
-        num_tiles         = 2 ** zoom
-        pixel_per_degree  = (num_tiles * TILE_SIZE) / 360.0
-        blat, blon        = self.last_api_center
-        cos_lat           = math.cos(math.radians(clat))
-
-        off_x = (clon - blon) * pixel_per_degree * cos_lat
-        off_y = -(clat - blat) * pixel_per_degree
-
-        new_size   = (int(map_w * scale_factor), int(map_h * scale_factor))
-        temp_scaled = self.raw_map_img.resize(new_size, Image.LANCZOS)
-        left       = (new_size[0] - map_w) / 2 + off_x
-        top        = (new_size[1] - map_h) / 2 + off_y
-        view_current = temp_scaled.crop((left, top, left + map_w, top + map_h))
-
-        # ── 이전 이미지 블렌딩 ──────────────────────────────────────────────
-        if hasattr(self, 'old_map_img') and self.old_map_img and self.blend_alpha < 1.0:
-            o_zoom_diff    = zoom - self.old_last_zoom
-            o_scale_factor = 2.0 ** o_zoom_diff
-            o_blat, o_blon = self.old_last_center
-            o_off_x = (clon - o_blon) * pixel_per_degree * cos_lat
-            o_off_y = -(clat - o_blat) * pixel_per_degree
-            o_new_size = (int(map_w * o_scale_factor), int(map_h * o_scale_factor))
-            o_scaled   = self.old_map_img.resize(o_new_size, Image.LANCZOS)
-            o_left     = (o_new_size[0] - map_w) / 2 + o_off_x
-            o_top      = (o_new_size[1] - map_h) / 2 + o_off_y
-            view_old   = o_scaled.crop((o_left, o_top, o_left + map_w, o_top + map_h))
-            view_img   = Image.blend(view_old, view_current, self.blend_alpha)
-        else:
-            view_img = view_current
-
-        # ── 마커 그리기 ─────────────────────────────────────────────────────
-        draw = ImageDraw.Draw(view_img)
-
-        # 핀 크기 배율 적용
-        pin_mult   = PIN_SIZE_MULT.get(self.pin_size_key, 1.0)
-        pin_radius = int(zoom * 0.7 * pin_mult)
-        if pin_radius < 1: pin_radius = 1
-
-        # 폰트 (굴림 고정)
-        font_size = self.font_size_var.get()
-        try:
-            label_font = ImageFont.truetype("gulim.ttc", font_size)
-        except:
-            try:
-                label_font = ImageFont.truetype("malgun.ttf", font_size)
-            except:
-                label_font = ImageFont.load_default()
-
-        pad = 15
-        r   = 4  # 라벨 모서리 효이
-
-        def label_rect(px, py, tw, th, direction, gap):
-            """라벨 8방향에 따른 (bx, by, rx1, ry1, rx2, ry2) 반환.
-            bx/by = 박스 좌상단, rx1..ry2 = 충돌 영역"""
-            diag = gap * 0.75
-            # 라벨 박스 좌상단 기준점
-            if direction == "top":
-                bx, by = px - tw / 2, py - gap - th - pad
-            elif direction == "bottom":
-                bx, by = px - tw / 2, py + gap
-            elif direction == "left":
-                bx, by = px - gap - tw - pad * 2, py - th / 2
-            elif direction == "right":
-                bx, by = px + gap, py - th / 2
-            elif direction == "top-left":
-                bx, by = px - diag - tw - pad * 2, py - diag - th - pad
-            elif direction == "top-right":
-                bx, by = px + diag, py - diag - th - pad
-            elif direction == "bottom-left":
-                bx, by = px - diag - tw - pad * 2, py + diag
-            else:  # bottom-right
-                bx, by = px + diag, py + diag
-
-            # 박스 영역 (좌우는 넓게 유지, 상하는 슬림하게 조정)
-            rx1, ry1 = int(bx - pad),       int(by - pad // 2.5)
-            rx2, ry2 = int(bx + tw + pad),  int(by + th + pad // 2.5 + 1)
-
-            # 텍스트를 박스 내 수평 중앙 정렬
-            box_w   = rx2 - rx1
-            tx = rx1 + (box_w - tw) / 2
-            ty = by
-            return tx, ty, rx1, ry1, rx2, ry2
-
-        def rects_overlap(a, b, margin=2):
-            """(x1,y1,x2,y2) 형식 두 사각형의 겹침 여부"""
-            ax1, ay1, ax2, ay2 = a
-            bx1, by1, bx2, by2 = b
-            return not (ax2 + margin < bx1 or bx2 + margin < ax1 or
-                        ay2 + margin < by1 or by2 + margin < ay1)
-
-        # ── 1 pass: 핀 온도 + 피하는 영역 파악 ───────────────────────────────
-        self.marker_positions = []
-        visible_items = []  # (item, px, py) for 2nd pass
-
-        for item in self.place_data:
-            if not item["var"].get():
-                continue
-            plon, plat = item["lon"], item["lat"]
-            px, py = latlon_to_pixel(plat, plon, zoom, clat, clon, map_w, map_h)
-            if not (0 <= px <= map_w and 0 <= py <= map_h):
-                continue
-
-            type_val     = item.get("type", "A")
-            # type_val(A/B/C/D) 우선, 없으면 글로벌 '색상변경' 키 사용
-            hex_color    = self.type_colors.get(type_val) or \
-                           self.type_colors.get("색상변경", "#1A3A8F")
-            border_color = hex_to_rgba(hex_color)
-
-            draw_outline_pin(draw, px, py, pin_radius, border_color=border_color)
-
-            self.marker_positions.append({
-                "bbox": (px - pin_radius, py - pin_radius,
-                         px + pin_radius, py + pin_radius),
-                "address": item["addr"],
-                "name": item["name"],
-            })
-            visible_items.append((item, px, py, border_color))
-
-        # ── 2 pass: 라벨 위치 결정 (겹침 회피) ─────────────────────────────
-        placed_rects = []  # 이미 점유된 영역 목록
-        label_draws  = []  # (tx, ty, rx1, ry1, rx2, ry2, border_color, name, direction)
-
-        # 핀 원 영역도 점유로 등록
-        for _, px, py, _ in visible_items:
-            placed_rects.append((px - pin_radius, py - pin_radius,
-                                 px + pin_radius, py + pin_radius))
-
-        # 방향 우선순위: 사용자 선택 먼저, 나머지 7방향
-        DIRECTIONS = ["top", "top-right", "right", "bottom-right",
-                      "bottom", "bottom-left", "left", "top-left"]
-        EXTRA_OFFSETS = [(0, 0), (8, 0), (-8, 0), (0, 8), (0, -8),
-                         (10, -6), (-10, -6), (10, 6), (-10, 6)]
-
-        for item, px, py, border_color in visible_items:
-            name      = item["name"]
-            label_dir = item.get("label_dir", "top")
-            gap       = pin_radius + 4
-
-            bbox = draw.textbbox((0, 0), name, font=label_font)
-            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-
-            pref_dirs = [label_dir] + [d for d in DIRECTIONS if d != label_dir]
-            placed    = False
-            chosen_dir = label_dir
-
-            for direction in pref_dirs:
-                for ox, oy in EXTRA_OFFSETS:
-                    tx, ty, rx1, ry1, rx2, ry2 = label_rect(
-                        px + ox, py + oy, tw, th, direction, gap
-                    )
-                    cand = (rx1, ry1, rx2, ry2)
-                    if not any(rects_overlap(cand, pr) for pr in placed_rects):
-                        placed_rects.append(cand)
-                        placed     = True
-                        chosen_dir = direction
-                        break
-                if placed:
-                    break
-
-            if not placed:
-                tx, ty, rx1, ry1, rx2, ry2 = label_rect(px, py, tw, th, label_dir, gap)
-                chosen_dir = label_dir
-
-            label_draws.append((tx, ty, rx1, ry1, rx2, ry2,
-                                 border_color, name, chosen_dir, tw, th, px, py))
-
-        # ── 3 pass: force-directed repulsion ─────────────────────────────────
-        # 라벨 쌍이 겹칠 때마다 서로 반대 방향으로 밀어내고 반복
-        REPULSE_ITERS = 10
-        MAX_DISP      = 90    # 원래 위치에서 최대 이동 허용 px
-        MARGIN        = 3     # 라벨 간 최소 여백
-
-        # 각 라벨의 (dx, dy) 누적 변위
-        n = len(label_draws)
-        disps = [[0.0, 0.0] for _ in range(n)]
-
-        pin_rects = placed_rects[:len(visible_items)]  # 핀 원 영역
-
-        for _ in range(REPULSE_ITERS):
-            for a in range(n):
-                ta = label_draws[a]
-                ax1 = ta[2] + disps[a][0];  ax2 = ta[4] + disps[a][0]
-                ay1 = ta[3] + disps[a][1];  ay2 = ta[5] + disps[a][1]
-                acx = (ax1 + ax2) / 2;      acy = (ay1 + ay2) / 2
-                aw = ax2 - ax1;             ah = ay2 - ay1
-
-                for b in range(a + 1, n):
-                    tb = label_draws[b]
-                    bx1 = tb[2] + disps[b][0];  bx2 = tb[4] + disps[b][0]
-                    by1 = tb[3] + disps[b][1];  by2 = tb[5] + disps[b][1]
-                    bcx = (bx1 + bx2) / 2;      bcy = (by1 + by2) / 2
-                    bw = bx2 - bx1;             bh = by2 - by1
-
-                    ov_x = (aw + bw) / 2 + MARGIN - abs(acx - bcx)
-                    ov_y = (ah + bh) / 2 + MARGIN - abs(acy - bcy)
-                    if ov_x <= 0 or ov_y <= 0:
-                        continue  # 겹치지 않음
-
-                    # 겹침 방향 벡터
-                    dx = acx - bcx or 0.01
-                    dy = acy - bcy or 0.01
-                    dist = math.sqrt(dx * dx + dy * dy) or 0.01
-                    push = min(ov_x, ov_y) * 0.55
-                    nx = dx / dist * push
-                    ny = dy / dist * push
-
-                    disps[a][0] += nx;  disps[a][1] += ny
-                    disps[b][0] -= nx;  disps[b][1] -= ny
-
-            # 핀 원형과 겹치면 핀 反방향으로 밀기
-            for a in range(n):
-                ta = label_draws[a]
-                ax1 = ta[2] + disps[a][0];  ax2 = ta[4] + disps[a][0]
-                ay1 = ta[3] + disps[a][1];  ay2 = ta[5] + disps[a][1]
-                acx = (ax1 + ax2) / 2;      acy = (ay1 + ay2) / 2
-                for px1, py1, px2, py2 in pin_rects:
-                    pcx = (px1 + px2) / 2;  pcy = (py1 + py2) / 2
-                    pr  = (px2 - px1) / 2
-                    dx = acx - pcx or 0.01
-                    dy = acy - pcy or 0.01
-                    dist = math.sqrt(dx*dx + dy*dy) or 0.01
-                    if dist < pr + MARGIN:
-                        push = (pr + MARGIN - dist) * 0.7
-                        disps[a][0] += dx / dist * push
-                        disps[a][1] += dy / dist * push
-
-        # 최대 변위 클램핑
-        final_disps = {}
-        for i, (dx, dy) in enumerate(disps):
-            total = math.sqrt(dx*dx + dy*dy)
-            if total > MAX_DISP:
-                dx, dy = dx / total * MAX_DISP, dy / total * MAX_DISP
-            if abs(dx) > 0.5 or abs(dy) > 0.5:
-                final_disps[i] = (dx, dy)
-
-        # ── 최종 그리기 ──────────────────────────────────────────────────────
-        border_w = 3  # 테두리 선 두께 고정 (더 굵게)
-
-        # ── Pass A: 연결선 (핀 → 라벨 가까운 모서리) ───────────────────────
-        for i, ld in enumerate(label_draws):
-            tx, ty, rx1, ry1, rx2, ry2, border_color, name, direction, tw, th, lpx, lpy = ld
-            if i in final_disps:
-                fdx, fdy = final_disps[i]
-                rx1 += fdx;  ry1 += fdy
-                rx2 += fdx;  ry2 += fdy
-
-            # 핀 중심에서 라벨 박스의 가장 가까운 점 계산
-            cx = max(rx1, min(rx2, lpx))
-            cy = max(ry1, min(ry2, lpy))
-            dist = math.sqrt((lpx - cx)**2 + (lpy - cy)**2)
-            if dist < 3:
-                continue  # 핀이 라벨 안에 있으면 생략
-
-            # 핀 원 가장자리에서 출발 (연결선이 핀 안쪽에서 시작하지 않게)
-            if dist > 0:
-                ratio = pin_radius / dist
-                sx = int(lpx + (cx - lpx) * ratio)
-                sy = int(lpy + (cy - lpy) * ratio)
-            else:
-                sx, sy = int(lpx), int(lpy)
-
-            r_color = (*border_color[:3], 220)  # 더 명확한 반투명 선
-            draw.line([(sx, sy), (int(cx), int(cy))], fill=r_color, width=2)
-
-        # ── Pass B: 라벨 박스 + 텍스트 ──────────────────────────────────────
-        for i, ld in enumerate(label_draws):
-            tx, ty, rx1, ry1, rx2, ry2, border_color, name, direction, tw, th, lpx, lpy = ld
-            if i in final_disps:
-                fdx, fdy = final_disps[i]
-                tx  += fdx;  ty  += fdy
-                rx1 += fdx;  ry1 += fdy
-                rx2 += fdx;  ry2 += fdy
-
-            draw.rounded_rectangle([rx1, ry1, rx2, ry2], radius=r,
-                                   fill=(255, 255, 255, 235),
-                                   outline=border_color, width=border_w)
-            draw.text(
-                (int(tx), int(ty)), name,
-                fill=border_color, font=label_font,
-            )
-
-        # 캔버스에 표시
-        photo = ImageTk.PhotoImage(view_img)
+        self.marker_positions = positions
+        photo = ImageTk.PhotoImage(img)
         self.map_label.config(image=photo)
         self.map_label.image = photo
 
