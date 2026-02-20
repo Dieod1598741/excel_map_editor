@@ -1,0 +1,12 @@
+venv/
+build/
+dist/
+__pycache__/
+*.spec
+config.json
+debug_out.json
+search_debug.json
+*.pyc
+.ipynb_checkpoints/
+.vscode/
+.idea/
