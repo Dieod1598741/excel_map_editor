@@ -216,6 +216,10 @@ class AddressMapApp:
             messagebox.showwarning("경고", "API 키를 입력해 주세요.")
             return
         self.api_key = new_key
+        # 지오코딩 엔진의 API 키도 함께 업데이트
+        if hasattr(self, 'geo_engine'):
+            self.geo_engine.api_key = new_key
+            
         cfg = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
         try:
             with open(cfg, "w") as f:
