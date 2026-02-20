@@ -19,6 +19,20 @@
    python map_app.py
    ```
 
+## 📦 실행 파일(EXE) 만들기
+파이썬이 설치되지 않은 환경에서도 실행할 수 있도록 `.exe` 파일로 만들 수 있습니다.
+
+1. **PyInstaller 설치**:
+   ```bash
+   pip install pyinstaller
+   ```
+2. **EXE 변환**: 터미널에서 아래 명령어를 실행하세요.
+   ```bash
+   pyinstaller --noconsole --onefile --name "ExcelMapEditor" map_app.py
+   ```
+   - `--noconsole`: 프로그램을 실행할 때 검은색 터미널 창이 뜨지 않게 합니다.
+   - `--onefile`: 여러 파일을 하나로 합쳐서 간단하게 만듭니다.
+
 ## ⚠️ 꼭 확인하세요!
 - **API 키**: 지도를 불러오려면 [Vworld](https://www.vworld.kr)에서 발급받은 API 키가 필요합니다. (실행 후 프로그램 내에서 입력 가능)
 - **보안**: 여러분의 API 키는 `config.json`이라는 개인 설정 파일에 저장되며, 보안을 위해 GitHub에는 업로드되지 않도록 설정되어 있습니다. 안심하고 사용하세요!
