@@ -1,3 +1,10 @@
+"""
+Excel Map Editor - Professional Mapping Solution
+Copyright (c) 2026
+
+This application provides a robust interface for geocoding Excel-based address data 
+and rendering high-quality static maps using the Vworld API.
+"""
 import ttkbootstrap as tb
 from ttkbootstrap.constants import *
 from ttkbootstrap.scrolled import ScrolledFrame
@@ -10,24 +17,29 @@ import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import math
+import threading
+from typing import Optional, Tuple, Dict, List
 
-# Vworld API Endpoints
+# =============================================================================
+# API CONFIGURATION & CONSTANTS
+# =============================================================================
+
+# Vworld API Endpoints for Geocoding and Static Map Services
 GEOCODE_URL = "http://api.vworld.kr/req/address"
 SEARCH_URL  = "http://api.vworld.kr/req/search"
 STATIC_MAP_URL = "http://api.vworld.kr/req/image"
 
-# Web Mercator Projection Constants
-TILE_SIZE = 256
+# Projection Constants
+TILE_SIZE = 256  # Standard Web Mercator tile size
 
-# ── 타입별 프리셋 색상 팔레트 (클릭할 때마다 순환) ─────────────────────────────
-# 각 타입은 4가지 색상 중 하나를 순서대로 사용
+# Palette definition for pin categorization
 PRESET_PALETTES = [
-    "#1A3A8F",  # 네이비 블루
-    "#E83030",  # 빨강
-    "#2A9A2A",  # 초록
-    "#E87A00",  # 주황
-    "#8B008B",  # 보라
-    "#008B8B",  # 청록
+    "#1A3A8F",  # Navy Blue
+    "#E83030",  # Red
+    "#2A9A2A",  # Green
+    "#E87A00",  # Orange
+    "#8B008B",  # Purple
+    "#008B8B",  # Teal
 ]
 
 # 타입별 초기 팔레트 인덱스
@@ -61,9 +73,23 @@ FONT_OPTIONS = {
 }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-def latlon_to_pixel(lat, lon, zoom, center_lat, center_lon, map_width, map_height):
-    """위경도를 지도 이미지상의 픽셀 좌표로 변환 (Web Mercator)"""
+# =============================================================================
+# GEOSPATIAL UTILITIES
+# =============================================================================
+
+def latlon_to_pixel(lat: float, lon: float, zoom: float, center_lat: float, center_lon: float, map_width: int, map_height: int) -> Tuple[int, int]:
+    """
+    Converts WGS84 Geodetic coordinates to pixel coordinates using Web Mercator Projection.
+    
+    Args:
+        lat, lon: Target coordinates.
+        zoom: Current zoom level.
+        center_lat, center_lon: Map center coordinates.
+        map_width, map_height: Dimensions of the viewport.
+        
+    Returns:
+        (x, y) tuple in pixel space.
+    """
     def lon_to_x(ln, z):
         return (ln + 180.0) / 360.0 * (TILE_SIZE * (2 ** z))
 
@@ -103,8 +129,13 @@ def draw_outline_pin(draw, x, y, radius, border_color=(26, 58, 143, 255)):
                  outline=border_color, width=border_width)
 
 
-def calculate_zoom_and_center(coords, map_width, map_height, padding=0.05):
-    """[브루트 포스 검증 v5.2] 타이트한 줌 - 핀 높이와 라벨 너비를 최소화하여 최대 확대"""
+def calculate_zoom_and_center(coords: List[Tuple[float, float]], map_width: int, map_height: int, padding: float = 0.05) -> Tuple[float, float, float]:
+    """
+    Determines the optimal center and zoom level to fit all provided coordinates within the viewport.
+    
+    Uses a brute-force fitting algorithm to ensure all markers and their labels are visible,
+    respecting a safety margin (padding).
+    """
     if not coords:
         return 37.5666, 126.9784, 12.0
 
@@ -209,6 +240,10 @@ class AddressMapApp:
         self.font_size_var = tk.IntVar(value=12)
 
         self.tooltip = ToolTip(self.root)
+        
+        # Geocoding cache to minimize API calls and respect quotas
+        self.geocode_cache: Dict[str, Tuple[float, float, str]] = {}
+        
         self.setup_ui()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -457,33 +492,41 @@ class AddressMapApp:
     # ─────────────────────────────────────────────────────────────────────────
     # 지오코딩 엔진
     # ─────────────────────────────────────────────────────────────────────────
-    def geocode(self, address):
+    def geocode(self, address: str) -> Tuple[Optional[float], Optional[float], Optional[str]]:
+        """
+        Main entry point for geocoding. Checks cache first before making API calls.
+        """
         address = str(address).strip()
+        if not address or address.lower() == "nan":
+            return None, None, None
+
+        # Check Cache
+        if address in self.geocode_cache:
+            return self.geocode_cache[address]
+
         for art in ["(위치를 찾을 수 없음)", "(실패)", "[실패]", "위치를 찾을 수 없음"]:
             address = address.replace(art, "").strip()
-        if not address or address == "nan":
-            return None, None, None
 
         refined_addr = self._standardize_province_name(address)
         lon, lat, road_addr = self._smart_search_orchestrator(refined_addr)
-        if lon:
-            return lon, lat, road_addr
-
-        if "세종" in refined_addr:
+        
+        if not lon and "세종" in refined_addr:
             fb = refined_addr.replace("세종특별자치시", "세종").replace("세종시", "세종")
             if fb != refined_addr:
                 lon, lat, road_addr = self._smart_search_orchestrator(fb)
-                if lon:
-                    return lon, lat, road_addr
 
-        parts = refined_addr.split(" ")
-        if len(parts) > 2:
-            for i in range(1, len(parts) - 1):
-                lon, lat, road_addr = self._smart_search_orchestrator(" ".join(parts[i:]))
-                if lon:
-                    return lon, lat, road_addr
+        if not lon:
+            parts = refined_addr.split(" ")
+            if len(parts) > 2:
+                for i in range(1, len(parts) - 1):
+                    lon, lat, road_addr = self._smart_search_orchestrator(" ".join(parts[i:]))
+                    if lon: break
 
-        return None, None, None
+        # Update Cache
+        if lon:
+            self.geocode_cache[address] = (lon, lat, road_addr)
+            
+        return lon, lat, road_addr
 
     def _standardize_province_name(self, address):
         replacements = {
@@ -576,56 +619,59 @@ class AddressMapApp:
     # 엑셀 로드
     # ─────────────────────────────────────────────────────────────────────────
     def load_excel(self):
+        """Triggers the Excel loading process in a separate background thread."""
         if not self.api_key:
-            messagebox.showerror("오류", "API 키가 없습니다.")
+            messagebox.showerror("Error", "API Key is required.")
             return
         file_path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx *.xls")])
         if not file_path:
             return
 
-        self.add_log(f"파일 선택됨: {os.path.basename(file_path)}")
-        self.add_log("--- 1단계: 주소 변환(지오코딩) 시작 ---")
-        self.root.update_idletasks()
+        # Start background processing thread
+        thread = threading.Thread(target=self._process_excel_thread, args=(file_path,), daemon=True)
+        thread.start()
+
+    def _process_excel_thread(self, file_path: str):
+        """
+        Background worker for parsing Excel and geocoding.
+        Maintains UI responsiveness by offloading heavy IO/CPU tasks.
+        """
+        self.add_log(f"Loading file: {os.path.basename(file_path)}")
+        self.add_log("Step 1: Commencing Geocoding...")
 
         try:
             df = pd.read_excel(file_path)
             df.columns = [str(c).strip() for c in df.columns]
 
             if '주소' not in df.columns:
-                messagebox.showerror("오류", "'주소' 컬럼을 찾을 수 없습니다.")
+                self.root.after(0, lambda: messagebox.showerror("Error", "'Address' column not found."))
                 return
 
             total_rows = len(df)
-            self.place_data = []
+            temp_place_data = []
 
-            # 기존 목록 초기화
-            for widget in self.scrollable_frame.winfo_children():
-                widget.destroy()
+            # Clear existing list in UI thread
+            self.root.after(0, self._clear_ui_on_load)
 
             success_count = 0
             fail_count    = 0
 
             for i, row in df.iterrows():
+                # Update progress bar
                 self.progress_var.set((i + 1) / total_rows * 50)
-                self.root.update_idletasks()
 
                 addr_raw = row.get('주소')
-                if pd.isna(addr_raw):
-                    continue
+                if pd.isna(addr_raw): continue
                 addr = str(addr_raw).strip()
-                if not addr or addr.lower() == "nan":
-                    continue
+                if not addr or addr.lower() == "nan": continue
 
                 name_raw  = row.get('장소명')
                 name      = str(name_raw).strip() if not pd.isna(name_raw) and str(name_raw).strip() else addr
 
-                # 타입 컬럼 처리 (없으면 'A' 기본값)
                 type_raw  = row.get('타입', 'A')
                 type_val  = str(type_raw).strip().upper() if not pd.isna(type_raw) else 'A'
-                if type_val not in ('A', 'B', 'C', 'D'):
-                    type_val = 'A'
+                if type_val not in ('A', 'B', 'C', 'D'): type_val = 'A'
 
-                # 순서 컬럼 처리 (없으면 행 인덱스 사용)
                 order_raw = row.get('순서', None)
                 try:
                     order_val = int(float(order_raw)) if order_raw is not None and not pd.isna(order_raw) else i
@@ -635,101 +681,102 @@ class AddressMapApp:
                 lon, lat, road_addr = self.geocode(addr)
 
                 if lon and lat:
-                    var     = tk.BooleanVar(value=True)
-                    dir_var = tk.StringVar(value="⬆ 위")
-
-                    item_data = {
-                        "lon": lon, "lat": lat,
-                        "name": name, "addr": road_addr,
-                        "type": type_val,
-                        "order": order_val,
-                        "label_dir": "top",
-                        "dir_var": dir_var,
-                        "visible": True, "var": var,
-                    }
-                    self.place_data.append(item_data)
-
-                    # ── 장소 목록 행 UI ─────────────────────────────────────
-                    item_container = tb.Frame(self.scrollable_frame)
-                    item_container.pack(fill=tk.X, padx=4, pady=2)
-
-                    top_row = tb.Frame(item_container)
-                    top_row.pack(fill=tk.X)
-
-                    # 색상 도트
-                    type_color = self.type_colors.get(type_val) or \
-                                 self.type_colors.get("색상변경", "#1A3A8F")
-                    tk.Label(top_row, text="  ", bg=type_color,
-                             width=1, relief="flat").pack(side=tk.LEFT, padx=(0, 4), pady=3)
-
-                    cb = tb.Checkbutton(top_row,
-                                        text=f"{success_count + 1}. {name}",
-                                        variable=var, command=self.refresh_map,
-                                        bootstyle="secondary-round-toggle")
-                    cb.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-                    # 현재 방향 요약 아이콘
-                    summary_lbl = tb.Label(top_row, text="↑", font=("Malgun Gothic", 10, "bold"), foreground="#1A3A8F")
-                    summary_lbl.pack(side=tk.LEFT, padx=5)
-                    item_data["summary_lbl"] = summary_lbl
-
-                    # 토글 버튼 (⚙️)
-                    toggle_btn = tb.Button(top_row, text="⚙️", width=3,
-                                           bootstyle="link-secondary",
-                                           command=lambda it=item_data: self._toggle_dir_controls(it))
-                    toggle_btn.pack(side=tk.LEFT, padx=2)
-
-                    # 라벨 방향 버튼 3×3 나침반 그리드 (초기엔 숨김)
-                    dir_btn_frame = tk.Frame(item_container, bg="#f8f9fa", bd=1, relief="solid")
-                    # 초기에는 pack하지 않음
-                    item_data["dir_btn_frame"] = dir_btn_frame
-                    
-                    dir_btns = {}
-                    DIR_GRID = [
-                        (0, 0, "↖", "top-left"),    (0, 1, "↑", "top"),    (0, 2, "↗", "top-right"),
-                        (1, 0, "←", "left"),                                  (1, 2, "→", "right"),
-                        (2, 0, "↙", "bottom-left"), (2, 1, "↓", "bottom"), (2, 2, "↘", "bottom-right"),
-                    ]
-                    def _make_dir_btn8(frame, r, c, sym, dirval, it, btns_ref):
-                        btn = tk.Button(
-                            frame, text=sym, width=2,
-                            font=("Malgun Gothic", 9),
-                            relief="flat", bd=0, bg="#f8f9fa",
-                            command=lambda: self._set_label_dir(it, dirval, btns_ref)
-                        )
-                        btn.grid(row=r, column=c, padx=2, pady=2)
-                        return btn
-                    
-                    inner_grid = tk.Frame(dir_btn_frame, bg="#f8f9fa")
-                    inner_grid.pack(padx=5, pady=2)
-
-                    for gr, gc, sym, dirval in DIR_GRID:
-                        btn = _make_dir_btn8(inner_grid, gr, gc, sym, dirval, item_data, dir_btns)
-                        dir_btns[dirval] = btn
-                    
-                    item_data["dir_btns"] = dir_btns
-                    self._refresh_dir_btns(item_data)
-
                     success_count += 1
+                    # Prepare data and update UI
+                    item_data = {
+                        "lon": lon, "lat": lat, "name": name, "addr": road_addr,
+                        "type": type_val, "order": order_val, "label_dir": "top",
+                        "visible": True, "success_idx": success_count
+                    }
+                    temp_place_data.append(item_data)
+                    self.root.after(0, lambda d=item_data: self._add_place_to_ui(d))
                     self.add_log(f"✓ {name} [{type_val}]")
                 else:
                     fail_count += 1
-                    self.add_log(f"✗ 실패: {addr}")
+                    self.add_log(f"✗ Failed: {addr}")
 
-            self.add_log(f"1단계 완료: {success_count}개 성공, {fail_count}개 실패")
-            self.progress_var.set(50)
-
-            if not self.place_data:
-                messagebox.showwarning("알림", "변환 가능한 주소가 없습니다.")
-                return
-
-            self.perform_initial_view()
-            self.add_log("--- 1.0초 후 2차 정밀 중앙 맞춤 ---")
-            self.root.after(1000, self.perform_perfect_centered_fit)
+            self.place_data = temp_place_data
+            self.add_log(f"Stage 1 Complete: {success_count} success, {fail_count} failed")
+            self.root.after(0, self._finalize_loading_ui)
 
         except Exception as e:
-            self.add_log(f"엑셀 읽기 오류: {e}")
-            messagebox.showerror("오류", f"엑셀 파일 읽기 오류: {e}")
+            self.add_log(f"Excel Extraction Error: {e}")
+            self.root.after(0, lambda: messagebox.showerror("Error", f"Failed to read file: {e}"))
+
+    def _clear_ui_on_load(self):
+        """Helper to clear UI elements from the main thread."""
+        for widget in self.scrollable_frame.winfo_children():
+            widget.destroy()
+
+    def _add_place_to_ui(self, item_data):
+        """
+        Dynamically adds a place item to the sidebar list.
+        Must be called via self.root.after for thread safety.
+        """
+        var     = tk.BooleanVar(value=True)
+        dir_var = tk.StringVar(value="⬆ 위")
+        item_data["var"] = var
+        item_data["dir_var"] = dir_var
+        
+        success_count = item_data["success_idx"]
+        name = item_data["name"]
+        type_val = item_data["type"]
+        
+        item_container = tb.Frame(self.scrollable_frame)
+        item_container.pack(fill=tk.X, padx=4, pady=2)
+
+        top_row = tb.Frame(item_container)
+        top_row.pack(fill=tk.X)
+
+        type_color = self.type_colors.get(type_val) or self.type_colors.get("색상변경", "#1A3A8F")
+        tk.Label(top_row, text="  ", bg=type_color, width=1, relief="flat").pack(side=tk.LEFT, padx=(0, 4), pady=3)
+
+        cb = tb.Checkbutton(top_row, text=f"{success_count}. {name}",
+                            variable=var, command=self.refresh_map,
+                            bootstyle="secondary-round-toggle")
+        cb.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        summary_lbl = tb.Label(top_row, text="↑", font=("Malgun Gothic", 10, "bold"), foreground="#1A3A8F")
+        summary_lbl.pack(side=tk.LEFT, padx=5)
+        item_data["summary_lbl"] = summary_lbl
+
+        toggle_btn = tb.Button(top_row, text="⚙️", width=3, bootstyle="link-secondary",
+                               command=lambda it=item_data: self._toggle_dir_controls(it))
+        toggle_btn.pack(side=tk.LEFT, padx=2)
+
+        dir_btn_frame = tk.Frame(item_container, bg="#f8f9fa", bd=1, relief="solid")
+        item_data["dir_btn_frame"] = dir_btn_frame
+        
+        dir_btns = {}
+        DIR_GRID = [
+            (0, 0, "↖", "top-left"),    (0, 1, "↑", "top"),    (0, 2, "↗", "top-right"),
+            (1, 0, "←", "left"),                                  (1, 2, "→", "right"),
+            (2, 0, "↙", "bottom-left"), (2, 1, "↓", "bottom"), (2, 2, "↘", "bottom-right"),
+        ]
+        
+        inner_grid = tk.Frame(dir_btn_frame, bg="#f8f9fa")
+        inner_grid.pack(padx=5, pady=2)
+
+        for gr, gc, sym, dirval in DIR_GRID:
+            btn = tk.Button(inner_grid, text=sym, width=2, font=("Malgun Gothic", 9),
+                            relief="flat", bd=0, bg="#f8f9fa",
+                            command=lambda it=item_data, dv=dirval, br=dir_btns: self._set_label_dir(it, dv, br))
+            btn.grid(row=gr, column=gc, padx=2, pady=2)
+            dir_btns[dirval] = btn
+        
+        item_data["dir_btns"] = dir_btns
+        self._refresh_dir_btns(item_data)
+
+    def _finalize_loading_ui(self):
+        """Triggers the final viewport adjustment and cleanup."""
+        self.progress_var.set(50)
+        if not self.place_data:
+            messagebox.showwarning("Notice", "No valid addresses found in the file.")
+            return
+
+        self.perform_initial_view()
+        self.add_log("--- Finetuning viewport in 1.0s ---")
+        self.root.after(1000, self.perform_perfect_centered_fit)
 
     def _set_label_dir(self, item_data, direction, btns_ref):
         """방향 버튼 클릭 → label_dir 업데이트 → 버튼 하이라이트 → 리렌더"""
@@ -795,6 +842,11 @@ class AddressMapApp:
     # 지도 갱신
     # ─────────────────────────────────────────────────────────────────────────
     def refresh_map(self):
+        """
+        Fetches a high-resolution base map from the Vworld Static Map API.
+        Offsets and scales are handled by the rendering engine to provide
+        seamless navigation while waiting for the new tile.
+        """
         if not self.place_data:
             return
 
@@ -814,8 +866,8 @@ class AddressMapApp:
         }
         try:
             req = requests.Request('GET', STATIC_MAP_URL, params=params).prepare()
-            self.add_log(f"고화질 베이스 갱신: {req.url.replace(self.api_key, 'MASKED')}")
-            self.root.update_idletasks()
+            self.add_log(f"Refreshing Base Map: {req.url.replace(self.api_key, 'MASKED')}")
+            # Offload heavy IO to avoid blocking the main event loop
             response = requests.get(STATIC_MAP_URL, params=params)
 
             if response.status_code == 200:
@@ -828,19 +880,21 @@ class AddressMapApp:
                     self.raw_map_img = Image.open(img_data).convert("RGBA")
                     self.start_crossfade()
                 except Exception as img_err:
-                    self.add_log(f"이미지 파싱 실패: {img_err}")
+                    self.add_log(f"Image Parsing Error: {img_err}")
             else:
-                self.add_log(f"지도 서버 오류: {response.status_code}")
+                self.add_log(f"Map Server Error: Status {response.status_code}")
         except Exception as e:
-            self.add_log(f"지도 로딩 오류: {e}")
+            self.add_log(f"Map Loading Error: {e}")
 
     def start_crossfade(self):
+        """Initiates a smooth alpha-blending transition between old and new map tiles."""
         if self.blend_timer:
             self.root.after_cancel(self.blend_timer)
         self.blend_alpha = 0.0
         self.animate_crossfade()
 
     def animate_crossfade(self):
+        """Iterative alpha update for the map transition animation."""
         self.blend_alpha += 0.2
         if self.blend_alpha >= 1.0:
             self.blend_alpha = 1.0
@@ -854,6 +908,11 @@ class AddressMapApp:
     # 렌더링 (핵심)
     # ─────────────────────────────────────────────────────────────────────────
     def render_current_view(self):
+        """
+        The Main Hybrid Rendering Engine.
+        Processes map panning, zooming, and marker/label positioning with collision avoidance.
+        Implements a Force-Directed Repulsion system for non-overlapping labels.
+        """
         if not hasattr(self, 'raw_map_img') or not self.raw_map_img:
             return
 
