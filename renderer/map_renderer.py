@@ -17,8 +17,9 @@ def hex_to_rgba(hex_color: str, alpha: int = 255) -> Tuple[int, int, int, int]:
     """16진수 색상 코드를 RGBA 튜플로 변환합니다."""
     hex_color = hex_color.lstrip('#')
     lv = len(hex_color)
-    rgb = tuple(int(hex_color[i:i + lv // 3], 16) for i in range(0, lv, lv // 3))
-    return (*rgb, alpha)
+    # slice indexing and tuple packing for lint stability
+    rgb = [int(hex_color[i:i + lv // 3], 16) for i in range(0, lv, lv // 3)]
+    return (rgb[0], rgb[1], rgb[2], alpha) # type: ignore
 
 class MapRenderer:
     """지도 이미지 위에 마커와 라벨을 그리는 렌더링 클래스"""
@@ -64,12 +65,12 @@ class MapRenderer:
         top  = (new_size[1] - map_h) / 2 + off_y
         view_current = temp_scaled.crop((left, top, left + map_w, top + map_h))
 
-        if old_map_img and blend_alpha < 1.0:
+        if old_map_img and blend_alpha < 1.0 and old_last_zoom is not None and old_last_center is not None:
             o_zoom_diff = zoom - old_last_zoom
             o_scale_factor = 2.0 ** o_zoom_diff
             o_blat, o_blon = old_last_center
-            o_off_x = (clon - o_blon) * pixel_per_degree * cos_lat
-            o_off_y = -(clat - o_blat) * pixel_per_degree
+            o_off_x = (clon - o_blon) * pixel_per_degree * cos_lat # type: ignore
+            o_off_y = -(clat - o_blat) * pixel_per_degree # type: ignore
             o_new_size = (int(map_w * o_scale_factor), int(map_h * o_scale_factor))
             o_scaled = old_map_img.resize(o_new_size, Image.LANCZOS)
             o_left = (o_new_size[0] - map_w) / 2 + o_off_x
@@ -85,7 +86,22 @@ class MapRenderer:
         if pin_radius < 1: pin_radius = 1
 
         try:
-            label_font = ImageFont.truetype("gulim.ttc", font_size)
+            # macOS와 Windows 모두에서 한글 표시가 가능한 폰트 후보군
+            font_candidates = [
+                "gulim.ttc", "malgun.ttf", # Windows
+                "/System/Library/Fonts/AppleGothic.ttf", # macOS
+                "/System/Library/Fonts/Cache/AppleGothic.ttf",
+                "Arial Unicode.ttf", "Helvetica.ttf"
+            ]
+            label_font = None
+            for f in font_candidates:
+                try:
+                    label_font = ImageFont.truetype(f, font_size)
+                    break
+                except: continue
+            
+            if not label_font:
+                label_font = ImageFont.load_default()
         except:
             label_font = ImageFont.load_default()
 
@@ -142,9 +158,10 @@ class MapRenderer:
             placed = False
             for direction in pref_dirs:
                 for ox, oy in EXTRA_OFFSETS:
+                    # int casting for coordinate stability
                     tx, ty, rx1, ry1, rx2, ry2 = label_rect(px+ox, py+oy, tw, th, direction, gap)
                     if not any(rects_overlap((rx1, ry1, rx2, ry2), pr) for pr in placed_rects):
-                        placed_rects.append((rx1, ry1, rx2, ry2)); label_draws.append((tx, ty, rx1, ry1, rx2, ry2, border_color, name, direction, tw, th, px, py))
+                        placed_rects.append((rx1, ry1, rx2, ry2)); label_draws.append((float(tx), float(ty), int(rx1), int(ry1), int(rx2), int(ry2), border_color, name, direction, int(tw), int(th), int(px), int(py)))
                         placed = True; break
                 if placed: break
             if not placed:

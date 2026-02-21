@@ -10,3 +10,4 @@ search_debug.json
 .ipynb_checkpoints/
 .vscode/
 .idea/
+.env

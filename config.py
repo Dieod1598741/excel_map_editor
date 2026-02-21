@@ -3,9 +3,21 @@ config.py - 설정 및 상수 관리 모듈
 """
 
 # 브이월드 API 엔드포인트
-GEOCODE_URL = "http://api.vworld.kr/req/address"
-SEARCH_URL  = "http://api.vworld.kr/req/search"
-STATIC_MAP_URL = "http://api.vworld.kr/req/image"
+VWORLD_GEOCODE_URL = "http://api.vworld.kr/req/address"
+VWORLD_SEARCH_URL  = "http://api.vworld.kr/req/search"
+VWORLD_STATIC_MAP_URL = "http://api.vworld.kr/req/image"
+
+# 네이버 지도 API 엔드포인트
+NAVER_GEOCODE_URL = "https://maps.apigw.ntruss.com/map-geocode/v2/geocode"
+NAVER_STATIC_MAP_URL = "https://maps.apigw.ntruss.com/map-static/v2/raster"
+
+# 기본 지도 서비스 제공자
+DEFAULT_PROVIDER = "vworld"  # "vworld" 또는 "naver"
+
+# 하위 호환성을 위한 별칭
+GEOCODE_URL = VWORLD_GEOCODE_URL
+SEARCH_URL = VWORLD_SEARCH_URL
+STATIC_MAP_URL = VWORLD_STATIC_MAP_URL
 
 # 투영법 및 지도 관련 상수
 TILE_SIZE = 256

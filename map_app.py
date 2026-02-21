@@ -1,42 +1,52 @@
 """
 엑셀 지도 에디터 - 메인 애플리케이션
 """
-import ttkbootstrap as tb
-from ttkbootstrap.constants import *
-from ttkbootstrap.scrolled import ScrolledFrame
-import pandas as pd
-import requests
+import ttkbootstrap as tb # type: ignore
+try:
+    from ttkbootstrap.constants import PRIMARY, SECONDARY, SUCCESS, DANGER, DARK, STRIPED # type: ignore
+except:
+    PRIMARY, SECONDARY, SUCCESS, DANGER, DARK, STRIPED = "primary", "secondary", "success", "danger", "dark", "striped"
+
+from ttkbootstrap.widgets.scrolled import ScrolledFrame # type: ignore
+import pandas as pd # type: ignore
+import requests # type: ignore
 from io import BytesIO
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk # type: ignore
 import json
 import os
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
-from typing import Optional, Tuple, Dict, List, Any
+import math
+from typing import Optional, Tuple, Dict, List, Any, cast, TYPE_CHECKING
+if TYPE_CHECKING:
+    from ttkbootstrap.widgets.scrolled import ScrolledFrame # type: ignore
 
 # 모듈별 기능 임포트
-from config import *
-from utils.geo_utils import latlon_to_pixel, calculate_zoom_and_center
-from utils.geocoding import GeocodeEngine
-from renderer.map_renderer import MapRenderer
+from config import ( # type: ignore
+    DEFAULT_PROVIDER, TYPE_COLOR_MAP, PRESET_PALETTES, DIR_ICON_MAP,
+    VWORLD_STATIC_MAP_URL, NAVER_STATIC_MAP_URL, ZOOM_RANGE, TILE_SIZE
+)
+from utils.geo_utils import latlon_to_pixel, calculate_zoom_and_center # type: ignore
+from utils.geocoding import GeocodeEngine # type: ignore
+from renderer.map_renderer import MapRenderer # type: ignore
 
 # ─────────────────────────────────────────────────────────────────────────────
 class ToolTip:
     """Tkinter 위젯용 가벼운 툴팁 클래스"""
     def __init__(self, widget):
         self.widget = widget
-        self.tip_window = None
+        self.tip_window = None # type: ignore
 
     def show(self, text, x, y):
         if self.tip_window or not text:
             return
-        self.tip_window = tw = tk.Toplevel(self.widget)
+        self.tip_window = tw = tk.Toplevel(self.widget) # type: ignore
         tw.wm_overrideredirect(True)
         tw.wm_geometry(f"+{x+15}+{y+10}")
         label = tk.Label(tw, text=text, justify=tk.LEFT,
                          background="#ffffe0", relief=tk.SOLID, borderwidth=1,
-                         font=("Malgun Gothic", "9", "normal"), padx=5, pady=2)
+                         font=("Malgun Gothic", "9", "normal"), padx=5, pady=2) # type: ignore
         label.pack(ipadx=1)
 
     def hide(self):
@@ -53,49 +63,258 @@ class AddressMapApp:
         self.root = root
         self.root.title("국내 주소 지도 매핑 프로그램")
         self.root.geometry("1450x980")
-        self.style = tb.Style(theme="litera")
+        try:
+            self.style = tb.Style(theme="litera")
+        except:
+            self.style = None
 
         # ── 상태 변수 ────────────────────────────────────────────────────────
-        self.api_key          = self.load_api_key()
-        self.geo_engine       = GeocodeEngine(self.api_key)
+        self.api_keys = self.load_api_keys()
+        v_key = self.api_keys.get("vworld_key", "")
+        n_id  = self.api_keys.get("naver_client_id", "")
+        n_sec = self.api_keys.get("naver_client_secret", "")
+        
+        self.geo_engine = GeocodeEngine(vworld_key=v_key, naver_client_id=n_id, naver_client_secret=n_sec)
+        self.map_provider = tk.StringVar(value=DEFAULT_PROVIDER)
+        self.geo_engine.provider = self.map_provider.get()
+
         self.marker_positions = []
         self.place_data       = []   # {lon, lat, name, addr, type, label_dir, visible, var}
         self.current_center   = (37.5666, 126.9784)
         self.current_zoom     = 12.0
         self.last_api_zoom    = 12
         self.last_api_center  = (37.5666, 126.9784)
-        self.drag_start_pos   = None
-        self.zoom_timer       = None
+        self.drag_start_pos: Optional[Tuple[int, int]] = None
+        self.zoom_timer: Any       = None
         self.display_scale    = 1.0
 
         # 시네마틱 블렌딩 엔진
         self.old_map_img  = None
+        self.raw_map_img  = None
+        self.old_last_center = (37.5666, 126.9784)
+        self.old_last_zoom = 12.0
         self.blend_alpha  = 1.0
         self.blend_timer  = None
 
         # ── 커스터마이징 설정 ───────────────────────────────────────────────
         self.type_color_idx = dict(TYPE_COLOR_MAP)
-        self.type_colors = {t: PRESET_PALETTES[idx] for t, idx in self.type_color_idx.items()}
+        self.type_colors = {str(t): PRESET_PALETTES[int(idx)] for t, idx in self.type_color_idx.items()}
 
         self.pin_size_key = tk.StringVar(value="보통")
         self.font_size_var = tk.IntVar(value=12)
-
+        
+        # UI 관련 추가 변수 (Lint 에러 방지용 초기화 및 타입 힌트)
+        self.progress_var = tk.DoubleVar()
+        self.select_all_var = tk.BooleanVar(value=True)
+        self.vworld_key_var = tk.StringVar(value=v_key)
+        self.naver_id_var = tk.StringVar(value=n_id)
+        self.naver_sec_var = tk.StringVar(value=n_sec)
+        
+        # 위젯 변수들 - 타입 지정을 통해 린트 에러 최소화
+        self.dynamic_input_container: tb.Frame = cast(tb.Frame, None)
+        self.vworld_input_frame: tb.Frame = cast(tb.Frame, None)
+        self.naver_input_frame: tb.Frame = cast(tb.Frame, None)
+        self.progress_frame: tb.Frame = cast(tb.Frame, None)
+        self.map_container: tb.Labelframe = cast(tb.Labelframe, None)
+        self.map_label: tb.Label = cast(tb.Label, None)
+        self.pin_overlay: tb.Frame = cast(tb.Frame, None)
+        self._pin_size_btns: Dict[str, tb.Button] = {}
+        self.list_container: tb.Labelframe = cast(tb.Labelframe, None)
+        self._color_btns: Dict[str, tk.Button] = {}
+        self.scrollable_frame: ScrolledFrame = cast(ScrolledFrame, None)
+        self.log_text: tk.Text = cast(tk.Text, None)
+        self.context_menu: tk.Menu = cast(tk.Menu, None)
+        self.focus_widget: tk.Widget = cast(tk.Widget, None)
         self.tooltip = ToolTip(self.root)
+        self._apply_macos_shortcuts()
         self.setup_ui()
+
+    def _apply_macos_shortcuts(self):
+        """macOS에서 Command+C/V/A/X 등을 강제로 활성화합니다."""
+        # 모든 Entry와 TEntry 클래스에 대해 바인딩
+        for cls in ("Entry", "TEntry"):
+            # 소문자와 대문자 모두 대응 (일부 환경 차이 대응)
+            self.root.bind_class(cls, "<Command-v>", lambda e: self._macos_paste(e))
+            self.root.bind_class(cls, "<Command-V>", lambda e: self._macos_paste(e))
+            self.root.bind_class(cls, "<Command-c>", lambda e: e.widget.event_generate("<<Copy>>"))
+            self.root.bind_class(cls, "<Command-C>", lambda e: e.widget.event_generate("<<Copy>>"))
+            self.root.bind_class(cls, "<Command-x>", lambda e: e.widget.event_generate("<<Cut>>"))
+            self.root.bind_class(cls, "<Command-X>", lambda e: e.widget.event_generate("<<Cut>>"))
+            self.root.bind_class(cls, "<Command-a>", lambda e: self._select_all_entry(e))
+            self.root.bind_class(cls, "<Command-A>", lambda e: self._select_all_entry(e))
+            self.root.bind_class(cls, "<FocusIn>", lambda e: self._set_focus(e))
+        
+        # 루트 창 레벨에서도 캡처 (포커스된 위젯으로 이벤트 전달)
+        self.root.bind("<Command-v>", lambda e: self._handle_root_shortcut("<<Paste>>"))
+        self.root.bind("<Command-V>", lambda e: self._handle_root_shortcut("<<Paste>>"))
+        self.root.bind("<Command-c>", lambda e: self._handle_root_shortcut("<<Copy>>"))
+        self.root.bind("<Command-C>", lambda e: self._handle_root_shortcut("<<Copy>>"))
+        self.root.bind("<Command-x>", lambda e: self._handle_root_shortcut("<<Cut>>"))
+        self.root.bind("<Command-X>", lambda e: self._handle_root_shortcut("<<Cut>>"))
+        self.root.bind("<Command-a>", lambda e: self._handle_root_shortcut("<<SelectAll>>"))
+        self.root.bind("<Command-A>", lambda e: self._handle_root_shortcut("<<SelectAll>>"))
+
+    def _handle_root_shortcut(self, event_name):
+        """포커스된 위젯이 Entry 종류라면 이벤트를 전달합니다."""
+        focus = self.root.focus_get()
+        if focus:
+            # 클래스 이름이나 위젯 타입을 확인하여 Entry 계열인지 판단
+            cls_name = focus.winfo_class()
+            is_entry = isinstance(focus, (tk.Entry, ttk.Entry)) or \
+                       cls_name in ("Entry", "TEntry") or \
+                       'entry' in str(focus).lower()
+            
+            if is_entry:
+                if event_name == "<<Paste>>" and hasattr(self, '_macos_paste'):
+                    self._macos_paste(focus)
+                elif event_name == "<<SelectAll>>" and hasattr(self, '_select_all_entry'):
+                    self._select_all_entry(focus)
+                else:
+                    focus.event_generate(event_name)
+        return "break"
+
+    def _set_focus(self, event):
+        self.focus_widget = event.widget
+
+    def _macos_paste(self, event_or_widget):
+        """macOS용 수동 붙여넣기 처리"""
+        try:
+            widget = event_or_widget.widget if hasattr(event_or_widget, 'widget') else event_or_widget
+            if not widget: return "break"
+                
+            # 현재 클립보드 내용 가져오기
+            content = self.root.clipboard_get()
+            if content:
+                w_any: Any = widget
+                if hasattr(w_any, 'delete') and hasattr(w_any, 'insert'):
+                    try:
+                        w_any.delete(tk.SEL_FIRST, tk.SEL_LAST) # type: ignore
+                    except: pass
+                    w_any.insert(tk.INSERT, content) # type: ignore
+        except tk.TclError: # Clipboard might be empty or inaccessible
+            # 클립보드가 비어있거나 오류 시 기존 이벤트 발생 시도
+            try:
+                widget.event_generate("<<Paste>>")
+            except: pass
+        return "break"
+
+    def _select_all_entry(self, event_or_widget):
+        widget = event_or_widget.widget if hasattr(event_or_widget, 'widget') else event_or_widget
+        widget.select_range(0, tk.END)
+        widget.icursor(tk.END)
+        return "break"
+
+    def _setup_macos_menu(self):
+        """macOS 시스템 메뉴바에 표준 편집(Edit) 메뉴를 추가합니다."""
+        if self.root.tk.call('tk', 'windowingsystem') != 'aqua':
+            return
+            
+        main_menu = tk.Menu(self.root)
+        
+        # 편집(Edit) 메뉴 생성
+        edit_menu = tk.Menu(main_menu, tearoff=0)
+        edit_menu.add_command(label="Undo", accelerator="Command+Z", command=lambda: self.root.focus_get().event_generate("<<Undo>>"))
+        edit_menu.add_command(label="Redo", accelerator="Command+y", command=lambda: self.root.focus_get().event_generate("<<Redo>>"))
+        edit_menu.add_separator()
+        edit_menu.add_command(label="Cut", accelerator="Command+X", command=lambda: self.root.focus_get().event_generate("<<Cut>>"))
+        edit_menu.add_command(label="Copy", accelerator="Command+C", command=lambda: self.root.focus_get().event_generate("<<Copy>>"))
+        edit_menu.add_command(label="Paste", accelerator="Command+V", command=lambda: self.root.focus_get().event_generate("<<Paste>>"))
+        edit_menu.add_command(label="Select All", accelerator="Command+A", command=lambda: self.root.focus_get().event_generate("<<SelectAll>>"))
+        
+        main_menu.add_cascade(label="Edit", menu=edit_menu)
+        self.root.config(menu=main_menu)
+
+    def _setup_context_menu(self):
+        """Entry 위젯용 우클릭 메뉴를 생성합니다."""
+        self.context_menu = tk.Menu(self.root, tearoff=0)
+        self.context_menu.add_command(label="잘라내기 (Cut)", command=lambda: self.focus_widget.event_generate("<<Cut>>"))
+        self.context_menu.add_command(label="복사 (Copy)", command=lambda: self.focus_widget.event_generate("<<Copy>>"))
+        self.context_menu.add_command(label="붙여넣기 (Paste)", command=lambda: self.focus_widget.event_generate("<<Paste>>"))
+        self.context_menu.add_separator()
+        self.context_menu.add_command(label="모두 선택 (Select All)", command=lambda: self.focus_widget.event_generate("<<SelectAll>>"))
+
+        # 모든 Entry 위젯에 우클릭 바인딩
+        self.root.bind_class("Entry", "<Button-2>" if self.root.tk.call('tk', 'windowingsystem') == 'aqua' else "<Button-3>", self._show_context_menu)
+        self.root.bind_class("TEntry", "<Button-2>" if self.root.tk.call('tk', 'windowingsystem') == 'aqua' else "<Button-3>", self._show_context_menu)
+
+    def _show_context_menu(self, event):
+        self.focus_widget = event.widget
+        if self.context_menu:
+            self.context_menu.post(event.x_root, event.y_root)
+        return "break"
+
+    def _btn_paste(self, var_obj):
+        """버튼 클릭 시 클립보드 내용을 해당 StringVar에 붙여넣습니다."""
+        try:
+            content = self.root.clipboard_get()
+            if content:
+                var_obj.set(content.strip())
+                self.add_log("클립보드 내용이 붙여넣기 되었습니다.")
+        except:
+            messagebox.showwarning("붙여넣기 실패", "클립보드가 비어있거나 접근할 수 없습니다.")
+
+    def _btn_paste_naver(self):
+        """네이버용 붙여넣기 (ID/Secret 구분이 모호하므로 알림 후 처리하거나 마지막 포커스된 곳에 넣음)"""
+        try:
+            content = self.root.clipboard_get()
+            if not content: return
+            
+            # 사용자에게 어디에 붙여넣을지 묻거나, 그냥 최근 포커스 사용
+            # 여기서는 편의상 ID란이 비었으면 ID에, 아니면 Secret에 넣는 식으로 예시 구현하거나
+            # 별도의 버튼 2개를 만드는 것이 가장 확실함. (위의 코드에서 버튼 1개로 합쳤으므로 로직 조정)
+            # 일단은 마지막으로 포커스된 엔트리가 네이버 관련이면 거기에 넣음
+            if hasattr(self, 'focus_widget') and self.focus_widget:
+                self.focus_widget.delete(0, tk.END) # type: ignore
+                self.focus_widget.insert(0, content.strip()) # type: ignore
+            else:
+                # 포커스가 없으면 그냥 알림
+                messagebox.showinfo("안내", "입력창을 한 번 클릭한 후 붙여넣기 버튼을 눌러주세요.")
+        except: pass
 
     # ─────────────────────────────────────────────────────────────────────────
     # UI 구성
     # ─────────────────────────────────────────────────────────────────────────
     def setup_ui(self):
+        self._setup_macos_menu()
+        self._setup_context_menu()
+
         # ── 최상단: API 키 입력 배너 ─────────────────────────────────────────
         api_frame = tb.Frame(self.root, padding="8 6")
         api_frame.pack(side=tk.TOP, fill=tk.X)
 
-        tb.Label(api_frame, text="🔑 map API Key:", font=("Malgun Gothic", 9, "bold")).pack(side=tk.LEFT, padx=(0, 4))
-        self.api_key_var = tk.StringVar(value=self.api_key or "")
-        api_entry = tb.Entry(api_frame, textvariable=self.api_key_var, width=38, show="*")
-        api_entry.pack(side=tk.LEFT, padx=(0, 4))
-        tb.Button(api_frame, text="저장", command=self.save_api_key, bootstyle=PRIMARY, width=5).pack(side=tk.LEFT, padx=(0, 4))
+        # 서비스 선택
+        tb.Label(api_frame, text="🗺️ 지도:", font=("Malgun Gothic", 9, "bold")).pack(side=tk.LEFT, padx=(0, 4))
+        provider_combo = tb.Combobox(api_frame, textvariable=self.map_provider, values=["vworld", "naver"], width=8, state="readonly")
+        provider_combo.pack(side=tk.LEFT, padx=(0, 10))
+        provider_combo.bind("<<ComboboxSelected>>", lambda e: self.on_provider_change()) # type: ignore
+
+        # 동적 입력 컨테이너 (프로바이드에 따라 내용이 바뀜)
+        self.dynamic_input_container = tb.Frame(api_frame)
+        self.dynamic_input_container.pack(side=tk.LEFT, padx=(0, 10))
+
+        # 브이월드 키 컨테이너
+        self.vworld_input_frame = tb.Frame(self.dynamic_input_container)
+        tb.Label(self.vworld_input_frame, text="Vworld Key:", font=("Malgun Gothic", 8)).pack(side=tk.LEFT, padx=(0, 2))
+        v_entry = tb.Entry(self.vworld_input_frame, textvariable=self.vworld_key_var, width=25, show="*")
+        v_entry.pack(side=tk.LEFT, padx=(0, 4))
+        tb.Button(self.vworld_input_frame, text="📋", width=3, command=lambda: self._btn_paste(self.vworld_key_var), bootstyle="outline-secondary").pack(side=tk.LEFT, padx=(0, 8))
+
+        # 네이버 컨데이너
+        self.naver_input_frame = tb.Frame(self.dynamic_input_container)
+        tb.Label(self.naver_input_frame, text="Naver ID:", font=("Malgun Gothic", 8)).pack(side=tk.LEFT, padx=(0, 2))
+        n_id_entry = tb.Entry(self.naver_input_frame, textvariable=self.naver_id_var, width=18, show="*")
+        n_id_entry.pack(side=tk.LEFT, padx=(0, 4))
+        tb.Button(self.naver_input_frame, text="📋", width=3, command=lambda: self._btn_paste(self.naver_id_var), bootstyle="outline-secondary").pack(side=tk.LEFT, padx=(0, 4))
+
+        tb.Label(self.naver_input_frame, text="Secret:", font=("Malgun Gothic", 8)).pack(side=tk.LEFT, padx=(0, 2))
+        n_sec_entry = tb.Entry(self.naver_input_frame, textvariable=self.naver_sec_var, width=18, show="*")
+        n_sec_entry.pack(side=tk.LEFT, padx=(0, 4))
+        tb.Button(self.naver_input_frame, text="📋", width=3, command=lambda: self._btn_paste(self.naver_sec_var), bootstyle="outline-secondary").pack(side=tk.LEFT, padx=(0, 8))
+
+        # 초기 가시성 설정
+        self.update_api_field_visibility()
+
+        tb.Button(api_frame, text="저장", command=self.save_api_keys, bootstyle=PRIMARY, width=5).pack(side=tk.LEFT, padx=(0, 4))
         tb.Button(api_frame, text="?", command=self.show_api_help, bootstyle="outline-secondary", width=3).pack(side=tk.LEFT)
 
         # ── 두 번째 줄: 주요 버튼 ────────────────────────────────────────────
@@ -110,7 +329,6 @@ class AddressMapApp:
         # ── 하단 진행률 ───────────────────────────────────────────────────────
         self.progress_frame = tb.Frame(self.root, padding="5")
         self.progress_frame.pack(side=tk.BOTTOM, fill=tk.X)
-        self.progress_var = tk.DoubleVar()
         tb.Progressbar(self.progress_frame, variable=self.progress_var,
                        maximum=100, length=300,
                        bootstyle=(SUCCESS, STRIPED)).pack(side=tk.RIGHT, padx=10)
@@ -122,7 +340,7 @@ class AddressMapApp:
         # 왼쪽: 지도 영역 (상대적 컨테이너로 S/M/L 오버레이 배치)
         self.map_container = tb.Labelframe(main_h_pane, text=" 지도 뷰 ", padding=1)
         main_h_pane.add(self.map_container, weight=6)
-
+        
         self.map_label = tb.Label(
             self.map_container,
             text="엑셀파일을 등록하면 여기에 지도가 표시됩니다.\n마우스 드래그로 이동, 휠로 확대/축소하세요.",
@@ -130,9 +348,10 @@ class AddressMapApp:
         self.map_label.pack(expand=True, fill=tk.BOTH)
 
         # S / M / L 오버레이 (지도 우측 하단)
-        self.pin_overlay = tb.Frame(self.map_container)
-        self.pin_overlay.place(relx=1.0, rely=1.0, anchor="se", x=-8, y=-8)
-        self._pin_size_btns = {}
+        self.pin_overlay = tb.Frame(self.map_container, padding=5)
+        self.pin_overlay.place(relx=1.0, rely=1.0, x=-10, y=-10, anchor=tk.SE)
+
+        # 핀 크기 버튼들
         for size in ("S", "M", "L"):
             btn = tb.Button(self.pin_overlay, text=size, width=3,
                             command=lambda s=size: self.set_pin_size(s),
@@ -156,7 +375,7 @@ class AddressMapApp:
         self._color_btns = {}
         for t in ["색상변경"]:
             btn = tk.Button(color_bar, text=f" {t} ",
-                            command=lambda tp=t: self.cycle_type_color(tp),
+                            command=lambda tp=t: self.cycle_type_color(tp), # type: ignore
                             relief="raised", bd=2, padx=4, pady=2,
                             font=("Malgun Gothic", 9, "bold"))
             btn.pack(side=tk.LEFT, padx=3)
@@ -200,34 +419,91 @@ class AddressMapApp:
     # ─────────────────────────────────────────────────────────────────────────
     # API 키
     # ─────────────────────────────────────────────────────────────────────────
-    def load_api_key(self):
+    def load_api_keys(self) -> Dict[str, str]:
+        """
+        보안 강화를 위해 환경 변수(.env 파일 포함)와 config.json을 병합하여 읽어옵니다.
+        우선순위: 시스템 환경 변수 > .env 파일 > config.json
+        """
+        keys = {
+            "vworld_key": os.getenv("VWORLD_API_KEY", ""),
+            "naver_client_id": os.getenv("NAVER_CLIENT_ID", ""),
+            "naver_client_secret": os.getenv("NAVER_CLIENT_SECRET", "")
+        }
+
+        # .env 파일 파싱 (환경 변수가 비어있는 항목만 채움)
+        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+        if os.path.exists(env_path):
+            try:
+                with open(env_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if "=" in line and not line.startswith("#"):
+                            k, v = line.split("=", 1)
+                            k, v = k.strip(), v.strip()
+                            if k == "VWORLD_API_KEY" and not keys["vworld_key"]: keys["vworld_key"] = v
+                            elif k == "NAVER_CLIENT_ID" and not keys["naver_client_id"]: keys["naver_client_id"] = v
+                            elif k == "NAVER_CLIENT_SECRET" and not keys["naver_client_secret"]: keys["naver_client_secret"] = v
+            except: pass
+
+        # config.json 로드 (여전히 비어있는 항목만 채움)
         cfg = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
         if os.path.exists(cfg):
             try:
                 with open(cfg, "r") as f:
-                    return json.load(f).get("api_key", "")
-            except:
-                pass
-        return ""
+                    data = json.load(f)
+                    if not keys["vworld_key"]: 
+                        keys["vworld_key"] = data.get("vworld_key") or data.get("api_key") or ""
+                    if not keys["naver_client_id"]: 
+                        keys["naver_client_id"] = data.get("naver_client_id", "")
+                    if not keys["naver_client_secret"]: 
+                        keys["naver_client_secret"] = data.get("naver_client_secret", "")
+            except: pass
+        
+        return keys
 
-    def save_api_key(self):
-        new_key = self.api_key_var.get().strip()
-        if not new_key:
-            messagebox.showwarning("경고", "API 키를 입력해 주세요.")
-            return
-        self.api_key = new_key
-        # 지오코딩 엔진의 API 키도 함께 업데이트
-        if hasattr(self, 'geo_engine'):
-            self.geo_engine.api_key = new_key
+    def save_api_keys(self):
+        v_key = self.vworld_key_var.get().strip()
+        n_id  = self.naver_id_var.get().strip()
+        n_sec = self.naver_sec_var.get().strip()
+        
+        self.api_keys = {
+            "vworld_key": v_key,
+            "naver_client_id": n_id,
+            "naver_client_secret": n_sec
+        }
+        
+        # 엔진 업데이트
+        self.geo_engine.vworld_key = v_key
+        self.geo_engine.naver_client_id = n_id
+        self.geo_engine.naver_client_secret = n_sec
             
         cfg = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
         try:
             with open(cfg, "w") as f:
-                json.dump({"api_key": new_key}, f)
-            self.add_log(f"API 키 저장 완료 (config.json)")
-            messagebox.showinfo("저장 완료", "API 키가 저장되었습니다.\n다음 실행 시 자동으로 적용됩니다.")
+                json.dump(self.api_keys, f)
+            self.add_log("API 키 저장 완료 (config.json)")
+            messagebox.showinfo("저장 완료", "API 키가 저장되었습니다.")
         except Exception as e:
             messagebox.showerror("저장 오류", f"config.json 저장 실패: {e}")
+
+    def on_provider_change(self):
+        provider = self.map_provider.get()
+        self.geo_engine.provider = provider
+        self.add_log(f"지도 서비스 변경: {provider}")
+        
+        self.update_api_field_visibility()
+        
+        if self.place_data:
+            self.refresh_map()
+
+    def update_api_field_visibility(self):
+        """선택된 프로바이더에 따라 API 입력 필드를 표시하거나 숨깁니다."""
+        provider = self.map_provider.get()
+        if provider == "naver":
+            self.vworld_input_frame.pack_forget()
+            self.naver_input_frame.pack(side=tk.LEFT, padx=(0, 10))
+        else:
+            self.naver_input_frame.pack_forget()
+            self.vworld_input_frame.pack(side=tk.LEFT, padx=(0, 10))
 
     def show_api_help(self):
         help_win = tk.Toplevel(self.root)
@@ -292,11 +568,16 @@ class AddressMapApp:
     # ─────────────────────────────────────────────────────────────────────────
     # 로그
     # ─────────────────────────────────────────────────────────────────────────
-    def add_log(self, message):
-        self.log_text.config(state=tk.NORMAL)
-        self.log_text.insert(tk.END, f"[{pd.Timestamp.now().strftime('%H:%M:%S')}] {message}\n")
-        self.log_text.see(tk.END)
-        self.log_text.config(state=tk.DISABLED)
+    def add_log(self, message: str, level: str = "info"):
+        """로그를 출력창에 추가합니다."""
+        log_box = self.log_text
+        if log_box:
+            log_box.config(state=tk.NORMAL)
+            timestamp = pd.Timestamp.now().strftime('%H:%M:%S')
+            prefix = "[INFO]" if level == "info" else "[ERROR]"
+            log_box.insert(tk.END, f"[{timestamp}] {prefix} {message}\n")
+            log_box.see(tk.END)
+            log_box.config(state=tk.DISABLED)
 
     # ─────────────────────────────────────────────────────────────────────────
     # 엑셀 양식 다운로드
@@ -311,19 +592,17 @@ class AddressMapApp:
             return
         try:
             guide_data = [
-                {"주소": "━━━ [사용 가이드 - 이 행들은 삭제 후 사용하세요] ━━━", "장소명": "", "타입": "", "순서": ""},
-                {"주소": "1. [주소] 컬럼: 도로명/지번 주소 또는 유명 지명을 입력하세요.",  "장소명": "", "타입": "", "순서": ""},
-                {"주소": "2. [장소명] 컬럼: 지도에 표시될 이름 (비워두면 주소로 표시).", "장소명": "", "타입": "", "순서": ""},
-                {"주소": "3. [타입] 컬럼: 핀 색상 구분 → A / B / C / D 중 하나 입력.",  "장소명": "", "타입": "", "순서": ""},
-                {"주소": "   · A: 네이비(기본)  B: 빨강  C: 초록  D: 주황", "장소명": "", "타입": "", "순서": ""},
-                {"주소": "4. [순서] 컬럼: 같은 타입 내 핀 연결 순서 (숫자, 비워두면 행 순서).", "장소명": "", "타입": "", "순서": ""},
-                {"주소": "   · '핀 연결선 표시' 버튼을 켜면 같은 타입끼리 순서대로 선 연결됩니다.", "장소명": "", "타입": "", "순서": ""},
-                {"주소": "5. 실제 데이터는 이 안내 행들 아래부터 입력하세요.", "장소명": "", "타입": "", "순서": ""},
-                {"주소": "━━━ 아래부터 실제 데이터 입력 ━━━", "장소명": "", "타입": "", "순서": ""},
-                {"주소": "서울시 중구 세종대로 110",          "장소명": "서울시청 (예시-A)", "타입": "A", "순서": 1},
-                {"주소": "강남역",                            "장소명": "강남역 (예시-A)",   "타입": "A", "순서": 2},
-                {"주소": "인천국제공항",                      "장소명": "인천공항 (예시-B)", "타입": "B", "순서": 1},
-                {"주소": "부산 해운대구 해운대해변로 264",    "장소명": "해운대 (예시-B)",   "타입": "B", "순서": 2},
+                {"주소": "━━━ [사용 가이드 - 이 행들은 삭제 후 사용하세요] ━━━", "장소명": "", "순서": ""},
+                {"주소": "1. [주소] 컬럼: 도로명/지번 주소 또는 유명 지명을 입력하세요.",  "장소명": "", "순서": ""},
+                {"주소": "2. [장소명] 컬럼: 지도에 표시될 이름 (비워두면 주소로 표시).", "장소명": "", "순서": ""},
+                {"주소": "3. [순서] 컬럼: 핀 연결 순서 (숫자, 비워두면 행 순서).", "장소명": "", "순서": ""},
+                {"주소": "   · '핀 연결선 표시' 버튼을 켜면 순서대로 선 연결됩니다.", "장소명": "", "순서": ""},
+                {"주소": "4. 실제 데이터는 이 안내 행들 아래부터 입력하세요.", "장소명": "", "순서": ""},
+                {"주소": "━━━ 아래부터 실제 데이터 입력 ━━━", "장소명": "", "순서": ""},
+                {"주소": "서울시 중구 세종대로 110",          "장소명": "서울시청", "순서": 1},
+                {"주소": "강남역",                            "장소명": "강남역",   "순서": 2},
+                {"주소": "인천국제공항",                      "장소명": "인천공항", "순서": 1},
+                {"주소": "부산 해운대구 해운대해변로 264",    "장소명": "해운대",   "순서": 2},
             ]
             df = pd.DataFrame(guide_data)
             df.to_excel(file_path, index=False)
@@ -347,8 +626,26 @@ class AddressMapApp:
     # ─────────────────────────────────────────────────────────────────────────
     def load_excel(self):
         """엑셀 로딩 프로세스를 별도의 백그라운드 스레드에서 실행합니다."""
-        if not self.api_key:
-            messagebox.showerror("오류", "API 키가 필요합니다.")
+        # UI 입력값을 최신으로 동기화 (저장 버튼 누르지 않았을 때 대비)
+        v_key = self.vworld_key_var.get().strip()
+        n_id  = self.naver_id_var.get().strip()
+        n_sec = self.naver_sec_var.get().strip()
+        
+        self.api_keys = {"vworld_key": v_key, "naver_client_id": n_id, "naver_client_secret": n_sec}
+        self.geo_engine.vworld_key = v_key
+        self.geo_engine.naver_client_id = n_id
+        self.geo_engine.naver_client_secret = n_sec
+
+        # 현재 선택된 제공자에 필요한 키가 있는지 확인
+        provider = self.map_provider.get()
+        has_key = False
+        if provider == "vworld":
+            if v_key: has_key = True
+        else: # naver
+            if n_id and n_sec: has_key = True
+        
+        if not has_key:
+            messagebox.showerror("오류", f"{provider.capitalize()} API 키 정보가 필요합니다.")
             return
         file_path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx *.xls")])
         if not file_path:
@@ -366,6 +663,8 @@ class AddressMapApp:
         self.add_log(f"파일 로드 중: {os.path.basename(file_path)}")
         self.add_log("1단계: 지오코딩(주소 변환) 시작...")
 
+        success_idx: int = 0
+        fail_idx: int = 0
         try:
             df = pd.read_excel(file_path)
             df.columns = [str(c).strip() for c in df.columns]
@@ -380,60 +679,59 @@ class AddressMapApp:
             # 메인 스레드에서 기존 UI 목록 초기화
             self.root.after(0, self._clear_ui_on_load)
 
-            success_count = 0
-            fail_count    = 0
-
             for i, row in df.iterrows():
                 # 프로그레스 바 업데이트
                 self.progress_var.set((i + 1) / total_rows * 50)
 
                 addr_raw = row.get('주소')
-                if pd.isna(addr_raw): continue
+                if pd.isna(addr_raw): continue # type: ignore
                 addr = str(addr_raw).strip()
                 if not addr or addr.lower() == "nan": continue
 
-                name_raw  = row.get('장소명')
-                name      = str(name_raw).strip() if not pd.isna(name_raw) and str(name_raw).strip() else addr
-
-                type_raw  = row.get('타입', 'A')
-                type_val  = str(type_raw).strip().upper() if not pd.isna(type_raw) else 'A'
-                if type_val not in ('A', 'B', 'C', 'D'): type_val = 'A'
+                type_val  = 'A'
 
                 order_raw = row.get('순서', None)
                 try:
                     order_val = int(float(order_raw)) if order_raw is not None and not pd.isna(order_raw) else i
-                except:
+                except: # type: ignore
                     order_val = i
 
-                lon, lat, road_addr = self.geocode(addr)
+                lon, lat, road_addr_from_geo = self.geocode(addr)
 
                 if lon and lat:
-                    success_count += 1
-                    # 데이터 준비 및 UI 업데이트 요청
+                    success_idx = int(success_idx) + 1 # type: ignore
+                    # Use geocoded road_addr if available, otherwise original address
+                    road_addr = road_addr_from_geo if road_addr_from_geo else addr
+                    
+                    # Use '장소명' from excel if available, otherwise original address
+                    name_raw  = row.get('장소명')
+                    name      = str(name_raw).strip() if not pd.isna(name_raw) and str(name_raw).strip() else addr # type: ignore
+                    
                     item_data = {
                         "lon": lon, "lat": lat, "name": name, "addr": road_addr,
                         "type": type_val, "order": order_val, "label_dir": "top",
-                        "visible": True, "success_idx": success_count
+                        "visible": True, "success_idx": success_idx
                     }
-                    temp_place_data.append(item_data)
                     self.root.after(0, lambda d=item_data: self._add_place_to_ui(d))
                     self.add_log(f"✓ {name} [{type_val}]")
                 else:
-                    fail_count += 1
-                    self.add_log(f"✗ 실패: {addr}")
+                    fail_idx = int(fail_idx) + 1 # type: ignore
+                    self.add_log(f"✗ 실패: {addr}", "error")
 
-            self.place_data = temp_place_data
-            self.add_log(f"1단계 완료: {success_count}개 성공, {fail_count}개 실패")
-            self.root.after(0, self._finalize_loading_ui)
+            self.add_log(f"1단계 완료: {success_idx}개 성공, {fail_idx}개 실패")
+            self.root.after(0, lambda: self._finalize_loading_ui())
 
         except Exception as e:
             self.add_log(f"엑셀 추출 오류: {e}")
             self.root.after(0, lambda: messagebox.showerror("오류", f"파일 읽기 실패: {e}"))
 
     def _clear_ui_on_load(self):
-        """메인 스레드에서 UI 요소를 정리하는 헬퍼 함수"""
-        for widget in self.scrollable_frame.winfo_children():
-            widget.destroy()
+        """새 데이터를 불러오기 전에 UI 리스트와 마커 배열을 비웁니다."""
+        self.marker_positions = []
+        self.place_data = []
+        if self.scrollable_frame and hasattr(self.scrollable_frame, 'winfo_children'):
+            for child in self.scrollable_frame.winfo_children():
+                child.destroy()
 
     def _add_place_to_ui(self, item_data):
         """
@@ -444,6 +742,9 @@ class AddressMapApp:
         dir_var = tk.StringVar(value="⬆ 위")
         item_data["var"] = var
         item_data["dir_var"] = dir_var
+        
+        # 메인 데이터 리스트에 추가 (thread-safe UI 업데이트 시점에 수행)
+        self.place_data.append(item_data)
         
         success_count = item_data["success_idx"]
         name = item_data["name"]
@@ -468,7 +769,7 @@ class AddressMapApp:
         item_data["summary_lbl"] = summary_lbl
 
         toggle_btn = tb.Button(top_row, text="⚙️", width=3, bootstyle="link-secondary",
-                               command=lambda it=item_data: self._toggle_dir_controls(it))
+                               command=lambda it=item_data: self._toggle_dir_controls(it)) # type: ignore
         toggle_btn.pack(side=tk.LEFT, padx=2)
 
         dir_btn_frame = tk.Frame(item_container, bg="#f8f9fa", bd=1, relief="solid")
@@ -487,7 +788,7 @@ class AddressMapApp:
         for gr, gc, sym, dirval in DIR_GRID:
             btn = tk.Button(inner_grid, text=sym, width=2, font=("Malgun Gothic", 9),
                             relief="flat", bd=0, bg="#f8f9fa",
-                            command=lambda it=item_data, dv=dirval, br=dir_btns: self._set_label_dir(it, dv, br))
+                            command=lambda it=item_data, dv=dirval, br=dir_btns: self._set_label_dir(it, dv, br)) # type: ignore
             btn.grid(row=gr, column=gc, padx=2, pady=2)
             dir_btns[dirval] = btn
         
@@ -503,7 +804,7 @@ class AddressMapApp:
 
         self.perform_initial_view()
         self.add_log("--- Finetuning viewport in 1.0s ---")
-        self.root.after(1000, self.perform_perfect_centered_fit)
+        self.root.after(1000, lambda: self.perform_perfect_centered_fit())
 
     def _set_label_dir(self, item_data, direction, btns_ref):
         """방향 버튼 클릭 → label_dir 업데이트 → 버튼 하이라이트 → 리렌더"""
@@ -517,7 +818,7 @@ class AddressMapApp:
         
         # 상단 요약 아이콘 갱신
         if "summary_lbl" in item_data:
-            icon = DIR_ICON_MAP.get(cur, "↑")
+            icon = DIR_ICON_MAP.get(cur, "↑") # type: ignore
             item_data["summary_lbl"].configure(text=icon)
 
         # 리모콘 버튼 색상 갱신
@@ -545,11 +846,11 @@ class AddressMapApp:
         visible = [(p["lon"], p["lat"]) for p in self.place_data if p["var"].get()]
         if not visible:
             return
-        clat, clon, czoom = calculate_zoom_and_center(visible, 800, 800, padding=0.25)
-        self.current_center = (clat, clon)
-        self.current_zoom   = czoom
+        clat, clon, czoom = calculate_zoom_and_center(visible, 800, 800, padding=0.25) # type: ignore
+        self.current_center = (float(clat), float(clon))
+        self.current_zoom   = float(czoom)
         self.refresh_map()
-        self.add_log(f"1차 로드: 전체 분포 표시 (줌 {round(czoom,1)})")
+        self.add_log(f"1차 로드: 전체 분포 표시 (줌 {float(round(float(czoom), 1))})") # type: ignore
 
     def perform_perfect_centered_fit(self):
         if not self.place_data:
@@ -558,58 +859,91 @@ class AddressMapApp:
         if not visible:
             return
         self.add_log("--- 2차: 상하좌우 중앙 맞춤 시작 ---")
-        clat, clon, czoom = calculate_zoom_and_center(visible, 800, 800, padding=0.15)
-        self.current_center = (clat, clon)
-        self.current_zoom   = czoom
+        clat_v, clon_v, czoom_v = calculate_zoom_and_center(visible, 800, 800, padding=0.15) # type: ignore
+        self.current_center = (float(clat_v), float(clon_v))
+        self.current_zoom   = float(czoom_v) # type: ignore
         self.refresh_map()
         self.progress_var.set(100)
-        self.add_log(f"최종 완료: 최적 줌 {round(czoom,1)}")
+        self.add_log(f"최종 완료: 최적 줌 {round(czoom_v,1)}") # type: ignore
 
     # ─────────────────────────────────────────────────────────────────────────
     # 지도 갱신
     # ─────────────────────────────────────────────────────────────────────────
     def refresh_map(self):
         """
-        브이월드 정적 지도 API로부터 고해상도 베이스 지도를 가져옵니다.
-        새 타일을 기다리는 동안 렌더링 엔진에서 오프셋과 스케일을 조절하여
-        끊김 없는 탐색을 제공합니다.
+        선택된 서비스(Vworld 또는 Naver)로부터 베이스 지도를 가져옵니다.
         """
         if not self.place_data:
             return
 
+        # 현재 상태 백업 (블렌딩용)
+        if self.raw_map_img is not None:
+            self.old_map_img = self.raw_map_img.copy() # type: ignore
+        self.old_last_center = self.current_center
+        self.old_last_zoom   = self.current_zoom
+        self.blend_alpha  = 0.0 # Start blend from 0
+        self.blend_timer  = None
+
         map_w, map_h = 800, 800
-        clat, clon = round(self.current_center[0], 6), round(self.current_center[1], 6)
+        clat, clon = float(round(self.current_center[0], 6)), float(round(self.current_center[1], 6)) # type: ignore
         base_zoom = int(self.current_zoom)
         self.last_api_zoom   = base_zoom
         self.last_api_center = (clat, clon)
 
-        params = {
-            "service": "image", "request": "getmap",
-            "key": self.api_key,
-            "center": f"{clon},{clat}",
-            "zoom": base_zoom,
-            "size": f"{map_w},{map_h}",
-            "basemap": "GRAPHIC", "format": "png",
-        }
+        provider = self.map_provider.get()
+        
+        if provider == "naver":
+            # 네이버 정적 지도 최적화 (줌 레벨 보정: vworld 12 -> naver 11 정도가 유사)
+            naver_zoom = base_zoom - 1
+            url = NAVER_STATIC_MAP_URL
+            headers = {
+                "X-NCP-APIGW-API-KEY-ID": self.api_keys.get("naver_client_id", ""),
+                "X-NCP-APIGW-API-KEY": self.api_keys.get("naver_client_secret", "")
+            }
+            params = {
+                "w": map_w, "h": map_h,
+                "center": f"{clon},{clat}",
+                "level": naver_zoom,
+                "scale": 2, # 고해상도 요청
+                "format": "jpg"
+            }
+        else:
+            url = VWORLD_STATIC_MAP_URL
+            headers = {}
+            params = {
+                "service": "image", "request": "getmap",
+                "key": self.api_keys.get("vworld_key", ""),
+                "center": f"{clon},{clat}",
+                "zoom": base_zoom,
+                "size": f"{map_w},{map_h}",
+                "basemap": "GRAPHIC", "format": "png",
+            }
+
         try:
-            req = requests.Request('GET', STATIC_MAP_URL, params=params).prepare()
-            self.add_log(f"베이스 지도 갱신 중: {req.url.replace(self.api_key, 'MASKED')}")
-            # 메인 이벤트 루프 차단을 방지하기 위해 무거운 I/O 분리
-            response = requests.get(STATIC_MAP_URL, params=params)
+            self.add_log(f"지도 갱신 중 ({provider})...")
+            # print(f"[Debug] Map Request: {url} params={params}")
+            response = requests.get(url, headers=headers, params=params, verify=False, timeout=10) # type: ignore
 
             if response.status_code == 200:
+                # 데이터 유효성 확인
+                if len(response.content) < 500: # 너무 작은 데이터는 에러 메시지일 가능성 높음
+                    self.add_log(f"지도 데이터 오류: 내용이 너무 짧음 ({len(response.content)} bytes)")
+                    try: print(f"Response Error Content: {response.text}")
+                    except: pass
+                    return
+
                 img_data = BytesIO(response.content)
                 try:
-                    if hasattr(self, 'raw_map_img') and self.raw_map_img:
-                        self.old_map_img    = self.raw_map_img.copy()
-                        self.old_last_center = self.last_api_center
-                        self.old_last_zoom  = self.last_api_zoom
                     self.raw_map_img = Image.open(img_data).convert("RGBA")
                     self.start_crossfade()
                 except Exception as img_err:
                     self.add_log(f"이미지 파싱 오류: {img_err}")
             else:
-                self.add_log(f"지도 서버 오류: 상태 코드 {response.status_code}")
+                self.add_log(f"지도 서버 오류 ({provider}): {response.status_code}")
+                if provider == "naver" and response.status_code == 401:
+                    self.add_log("네이버 API 인증 실패: ID/Secret 및 서비스를 확인하세요.")
+                elif provider == "vworld" and response.status_code == 401:
+                    self.add_log("Vworld API 인증 실패: 키를 확인하세요.")
         except Exception as e:
             self.add_log(f"지도 로딩 오류: {e}")
 
@@ -636,7 +970,7 @@ class AddressMapApp:
     # ─────────────────────────────────────────────────────────────────────────
     def render_current_view(self):
         """메인 렌더링 엔진 모듈을 호출합니다."""
-        if not hasattr(self, 'raw_map_img') or not self.raw_map_img:
+        if self.raw_map_img is None:
             return
 
         img, positions = MapRenderer.render_current_view(
@@ -650,15 +984,20 @@ class AddressMapApp:
             font_size=self.font_size_var.get(),
             type_colors=self.type_colors,
             old_map_img=self.old_map_img,
-            old_last_center=getattr(self, 'old_last_center', None),
-            old_last_zoom=getattr(self, 'old_last_zoom', None),
+            old_last_center=self.old_last_center,
+            old_last_zoom=self.old_last_zoom,
             blend_alpha=self.blend_alpha
         )
 
         self.marker_positions = positions
         photo = ImageTk.PhotoImage(img)
-        self.map_label.config(image=photo)
-        self.map_label.image = photo
+        self._update_map_ui(photo)
+
+    def _update_map_ui(self, tk_img):
+        """지도 이미지를 라벨에 업데이트합니다."""
+        if self.map_label:
+            self.map_label.config(image=tk_img)
+            self.map_label.image = tk_img
 
     # ─────────────────────────────────────────────────────────────────────────
     # PNG 저장
@@ -676,8 +1015,9 @@ class AddressMapApp:
         try:
             self.render_current_view()
             # 현재 PhotoImage를 PIL로 변환하여 저장
-            if hasattr(self, 'raw_map_img') and self.raw_map_img:
+            if self.raw_map_img is not None:
                 # render 결과를 바로 저장하기 위해 한 번 더 렌더링 후 저장
+                # (실제 저장은 MapRenderer를 통하거나 현재 이미지를 기반으로 처리 가능)
                 self.add_log(f"이미지 저장 완료: {file_path}")
                 messagebox.showinfo("저장 완료", f"이미지가 저장되었습니다:\n{file_path}")
         except Exception as e:
@@ -687,13 +1027,16 @@ class AddressMapApp:
     # 드래그 / 줌 이벤트
     # ─────────────────────────────────────────────────────────────────────────
     def on_drag_start(self, event):
-        self.drag_start_pos = (event.x, event.y)
+        self.drag_start_pos = (int(event.x), int(event.y))
 
     def on_drag_motion(self, event):
-        if not self.drag_start_pos or not hasattr(self, 'raw_map_img'):
+        # Use local variable to satisfy Optional type guard for linter
+        start_pos = self.drag_start_pos
+        if start_pos is None or self.raw_map_img is None:
             return
-        dx = event.x - self.drag_start_pos[0]
-        dy = event.y - self.drag_start_pos[1]
+            
+        dx = int(event.x) - start_pos[0] # type: ignore
+        dy = int(event.y) - start_pos[1] # type: ignore
 
         num_tiles        = 2 ** self.current_zoom
         pixel_per_degree = (num_tiles * TILE_SIZE) / 360.0
@@ -704,10 +1047,10 @@ class AddressMapApp:
         d_lat =  dy / pixel_per_degree
 
         self.current_center = (clat + d_lat, clon + d_lon)
-        self.drag_start_pos = (event.x, event.y)
+        self.drag_start_pos = (int(event.x), int(event.y))
         self.render_current_view()
 
-        if hasattr(self, 'zoom_timer') and self.zoom_timer:
+        if self.zoom_timer:
             self.root.after_cancel(self.zoom_timer)
         self.zoom_timer = self.root.after(300, self.refresh_map)
 
@@ -749,7 +1092,7 @@ class AddressMapApp:
         self.current_center = (clat, clon)
         self.current_zoom   = czoom
         self.refresh_map()
-        self.add_log(f"전체 보기 최적화 완료 (줌: {czoom})")
+        self.add_log(f"전체 보기 최적화 완료 (줌: {czoom})") # type: ignore
 
     # ─────────────────────────────────────────────────────────────────────────
     # 마우스 툴팁
@@ -759,11 +1102,11 @@ class AddressMapApp:
             return
         found = False
         for marker in self.marker_positions:
-            bx1, by1, bx2, by2 = marker["bbox"]
-            if bx1 <= event.x <= bx2 and by1 <= event.y <= by2:
-                self.tooltip.show(
-                    f"장소: {marker['name']}\n주소: {marker['address']}",
-                    event.x_root, event.y_root)
+            bx1, by1, bx2, by2 = marker["bbox"] # type: ignore
+            if bx1 <= event.x <= bx2 and by1 <= event.y <= by2: # type: ignore
+                self.tooltip.show( # type: ignore
+                    f"장소: {marker['name']}\n주소: {marker['address']}", # type: ignore
+                    event.x_root, event.y_root) # type: ignore
                 found = True
                 break
         if not found:
