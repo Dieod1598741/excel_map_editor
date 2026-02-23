@@ -18,9 +18,18 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
 import math
+import sys
 from typing import Optional, Tuple, Dict, List, Any, cast, TYPE_CHECKING
 if TYPE_CHECKING:
     from ttkbootstrap.widgets.scrolled import ScrolledFrame # type: ignore
+
+def get_app_dir():
+    """실행 파일 또는 스크립트가 위치한 디렉토리를 반환합니다."""
+    if getattr(sys, 'frozen', False):
+        # PyInstaller로 빌드된 경우 실행 파일(.exe)의 위치
+        return os.path.dirname(sys.executable)
+    # 스크립트로 실행되는 경우
+    return os.path.dirname(os.path.abspath(__file__))
 
 # 모듈별 기능 임포트
 from config import ( # type: ignore
@@ -74,7 +83,7 @@ class AddressMapApp:
         n_id  = self.api_keys.get("naver_client_id", "")
         n_sec = self.api_keys.get("naver_client_secret", "")
         
-        self.geo_engine = GeocodeEngine(vworld_key=v_key, naver_client_id=n_id, naver_client_secret=n_sec)
+        self.geo_engine = GeocodeEngine(vworld_key=v_key, naver_client_id=n_id, naver_client_secret=n_sec, log_fn=self.add_log)
         self.map_provider = tk.StringVar(value=DEFAULT_PROVIDER)
         self.geo_engine.provider = self.map_provider.get()
 
@@ -128,9 +137,29 @@ class AddressMapApp:
         self.tooltip = ToolTip(self.root)
         self._apply_macos_shortcuts()
         self.setup_ui()
+        self._log_current_keys()
+
+    def _log_current_keys(self):
+        """현재 로드된 API 키의 앞뒤 일부를 로그에 출력하여 확인을 돕습니다."""
+        def mask(s):
+            if not s: return "(미설정)"
+            if len(s) <= 8: return "****"
+            return f"{s[:4]}...{s[-4:]}"
+        
+        v_key = self.api_keys.get("vworld_key", "")
+        n_id  = self.api_keys.get("naver_client_id", "")
+        n_sec = self.api_keys.get("naver_client_secret", "")
+        
+        self.add_log("--- 현재 적용된 API 키 정보 ---")
+        self.add_log(f"Vworld: {mask(v_key)}")
+        self.add_log(f"Naver ID: {mask(n_id)}")
+        self.add_log(f"Naver Secret: {mask(n_sec)}")
+        self.add_log("----------------------------")
 
     def _apply_macos_shortcuts(self):
         """macOS에서 Command+C/V/A/X 등을 강제로 활성화합니다."""
+        if sys.platform != 'darwin':
+            return
         # 모든 Entry와 TEntry 클래스에 대해 바인딩
         for cls in ("Entry", "TEntry"):
             # 소문자와 대문자 모두 대응 (일부 환경 차이 대응)
@@ -431,7 +460,8 @@ class AddressMapApp:
         }
 
         # .env 파일 파싱 (환경 변수가 비어있는 항목만 채움)
-        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+        app_dir = get_app_dir()
+        env_path = os.path.join(app_dir, ".env")
         if os.path.exists(env_path):
             try:
                 with open(env_path, "r", encoding="utf-8") as f:
@@ -445,7 +475,7 @@ class AddressMapApp:
             except: pass
 
         # config.json 로드 (여전히 비어있는 항목만 채움)
-        cfg = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        cfg = os.path.join(app_dir, "config.json")
         if os.path.exists(cfg):
             try:
                 with open(cfg, "r") as f:
@@ -476,7 +506,7 @@ class AddressMapApp:
         self.geo_engine.naver_client_id = n_id
         self.geo_engine.naver_client_secret = n_sec
             
-        cfg = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        cfg = os.path.join(get_app_dir(), "config.json")
         try:
             with open(cfg, "w") as f:
                 json.dump(self.api_keys, f)
@@ -569,15 +599,17 @@ class AddressMapApp:
     # 로그
     # ─────────────────────────────────────────────────────────────────────────
     def add_log(self, message: str, level: str = "info"):
-        """로그를 출력창에 추가합니다."""
-        log_box = self.log_text
-        if log_box:
-            log_box.config(state=tk.NORMAL)
-            timestamp = pd.Timestamp.now().strftime('%H:%M:%S')
-            prefix = "[INFO]" if level == "info" else "[ERROR]"
-            log_box.insert(tk.END, f"[{timestamp}] {prefix} {message}\n")
-            log_box.see(tk.END)
-            log_box.config(state=tk.DISABLED)
+        """로그를 출력창에 추가합니다. (스레드 안전)"""
+        def _append():
+            log_box = self.log_text
+            if log_box:
+                log_box.config(state=tk.NORMAL)
+                timestamp = pd.Timestamp.now().strftime('%H:%M:%S')
+                prefix = "[INFO]" if level == "info" else "[ERROR]"
+                log_box.insert(tk.END, f"[{timestamp}] {prefix} {message}\n")
+                log_box.see(tk.END)
+                log_box.config(state=tk.DISABLED)
+        self.root.after(0, _append)
 
     # ─────────────────────────────────────────────────────────────────────────
     # 엑셀 양식 다운로드
@@ -666,7 +698,12 @@ class AddressMapApp:
         success_idx: int = 0
         fail_idx: int = 0
         try:
-            df = pd.read_excel(file_path)
+            try:
+                df = pd.read_excel(file_path)
+            except ImportError as ie:
+                self.add_log("Excel 엔진(openpyxl)이 누락되었습니다. 빌드 옵션을 확인해 주세요.", "error")
+                self.root.after(0, lambda: messagebox.showerror("오류", "Excel 엔진이 누락되었습니다. 빌드 시 openpyxl을 포함해야 합니다."))
+                return
             df.columns = [str(c).strip() for c in df.columns]
 
             if '주소' not in df.columns:

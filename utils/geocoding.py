@@ -8,12 +8,18 @@ from config import VWORLD_GEOCODE_URL, VWORLD_SEARCH_URL, NAVER_GEOCODE_URL
 class GeocodeEngine:
     """주소 변환 및 검색 최적화 엔진 클래스 (Vworld & Naver 지원)"""
     
-    def __init__(self, vworld_key: str = "", naver_client_id: str = "", naver_client_secret: str = ""):
+    def __init__(self, vworld_key: str = "", naver_client_id: str = "", naver_client_secret: str = "", log_fn=None):
         self.vworld_key = vworld_key
         self.naver_client_id = naver_client_id
         self.naver_client_secret = naver_client_secret
         self.provider = "vworld"
         self.cache: Dict[str, Tuple[float, float, str]] = {}
+        self.log_fn = log_fn
+
+    def _log(self, message: str, level: str = "info"):
+        if self.log_fn:
+            self.log_fn(message, level)
+        print(f"[{level.upper()}] {message}")
 
     def geocode(self, address: str, provider: str = None) -> Tuple[Optional[float], Optional[float], Optional[str]]:
         """
@@ -61,7 +67,7 @@ class GeocodeEngine:
         # 5. [Advanced] Cross-Provider Fallback
         # 선택한 엔진이 실패했을 경우, 다른 엔진의 검색(POI) 기능을 최후의 수단으로 사용
         other_provider = "vworld" if self.provider == "naver" else "naver"
-        print(f"[Advanced Fallback] Trying alternate provider: {other_provider}")
+        self._log(f"[Fallback] alternate provider: {other_provider}")
         
         # 임시로 프로바이더 변경 후 오케스트레이터 호출
         original_provider = self.provider
@@ -70,7 +76,7 @@ class GeocodeEngine:
         self.provider = original_provider
         
         if lon:
-            print(f"[Advanced Fallback Success] {address} found via {other_provider}")
+            self._log(f"[Fallback Success] {address} found via {other_provider}")
             self.cache[cache_key] = (lon, lat, road_addr)
             
         return lon, lat, road_addr
@@ -130,13 +136,12 @@ class GeocodeEngine:
             if res.get("response", {}).get("status") == "OK":
                 pt = res["response"]["result"]["point"]
                 refined = res["response"].get("refined", {}).get("text", addr)
-                print(f"[Vworld Geocode Success] {addr} -> {pt['x']}, {pt['y']}")
                 return float(pt["x"]), float(pt["y"]), refined
             else:
                 # 에러 로그 (개발 및 디버그용)
-                print(f"[Vworld Geocode Error] {addr}: {res.get('response', {}).get('status')}")
+                self._log(f"[Vworld Error] {addr}: {res.get('response', {}).get('status')}", "error")
         except Exception as e:
-            print(f"[Vworld Geocode Exception] {e}")
+            self._log(f"[Vworld Exception] {e}", "error")
         return None, None, None
 
     def _vworld_search_raw(self, query: str) -> Tuple[Optional[float], Optional[float], Optional[str]]:
@@ -160,13 +165,12 @@ class GeocodeEngine:
                         addr = addr_data.get("road") or addr_data.get("parcel") or "주소 정보 없음"
                     else:
                         addr = str(addr_data)
-                    
-                    print(f"[Vworld Search Success] {query} -> {pt['x']}, {pt['y']}")
+                    self._log(f"[Vworld Search Success] {query}")
                     return float(pt["x"]), float(pt["y"]), addr
             else:
-                print(f"[Vworld Search Error] {query}: {res.get('response', {}).get('status')}")
+                self._log(f"[Vworld Search Error] {query}: {res.get('response', {}).get('status')}", "error")
         except Exception as e:
-            print(f"[Vworld Search Exception] {e}")
+            self._log(f"[Vworld Search Exception] {e}", "error")
         return None, None, None
 
     def _naver_geocode_raw(self, addr: str) -> Tuple[Optional[float], Optional[float], Optional[str]]:
@@ -183,12 +187,11 @@ class GeocodeEngine:
             res = res_raw.json()
             if res.get("addresses"):
                 item = res["addresses"][0]
-                print(f"[Naver Geocode Success] {addr} -> {item['x']}, {item['y']}")
                 return float(item["x"]), float(item["y"]), item["roadAddress"] or item["jibunAddress"]
             else:
-                print(f"[Naver Geocode Error] {addr}: {res.get('errorMessage', 'No results')}")
+                self._log(f"[Naver Error] {addr}: {res.get('errorMessage', res.get('message', res_raw.text))}", "error")
         except Exception as e:
-            print(f"[Naver Geocode Exception] {e}")
+            self._log(f"[Naver Exception] {e}", "error")
         return None, None, None
 
     def _standardize_province_name(self, address: str) -> str:
